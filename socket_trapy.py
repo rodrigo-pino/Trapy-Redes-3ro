@@ -1,7 +1,7 @@
 import socket
 import logging
 
-from .utils import parse_address
+from utils import parse_address
 
 logger = logging.getLogger(__name__)
 

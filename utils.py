@@ -1,4 +1,6 @@
 from math import ceil
+from typing import Optional
+import re
 
 def parse_address(address:str):
     host, port = address.split(':')
@@ -23,14 +25,25 @@ def chunk_bytes(data:bytes, mtu:int=572):
     
     return data_chunk
 
-def set_flags(select) -> bytes:
-    select = select.split(" ")
-    flags = {"cwr":128, "ece":64, "urg":32, "ack":16, "psh":8, "rst":4, "syn":2, "fin":1}
-    num = 0
-    for flag in select:
-        num += flags[flag.lower()]
+# flags = "urg=0 ece=1 fin=1 ack=0"
+def parse_flags(flags:str):
+    on_flags = re.findall(r"[a-z][a-z][a-z][ ]*?=[ ]*?1", flags)
+    off_flags = re.findall(r"[a-z][a-z][a-z][ ]*?=[ ]*?0", flags)
+    for i in range(len(on_flags)):
+        on_flags[i] = on_flags[i][0:3]
+    for i in range(len(off_flags)):
+        off_flags[i] = off_flags[i][0:3]
+    return (on_flags, off_flags)
+
+def from_bytes_to_flags(flags_bytes:bytes):
+    flags = [(128,"cwr"), (64,"ece"), (32,"urg"), (16,"ack"), (8,"psh"), (4,"rst"), (2,"syn"), (1,"fin")]
+    on_flags = set()
+    num = int.from_bytes(flags_bytes, "big")
+    for bit, flag in flags:
+        if num & bit:
+            on_flags.add(flag)
     
-    return num.to_bytes(1, "big")
+    return on_flags
 
 def calculate_checksum(header:bytes) -> bytes:
     checksum = 0
@@ -46,6 +59,7 @@ def calculate_checksum(header:bytes) -> bytes:
         checksum += carry
     
     return (~checksum + 2**16).to_bytes(2, "big")
+
 
 
 #a = 3
@@ -69,9 +83,20 @@ def calculate_checksum(header:bytes) -> bytes:
 
 
 #header = b"\x45\x00\x00\x73\x00\x00\x40\x00\x40\x11\xb8\x61\xc0\xa8\x00\x01"
-header = b"\xc0\xa8\x00\xc7"
+#header = b"\xc0\xa8\x00\xc7"
 
 #r = calculate_checksum(header, "none")
 #print(int.from_bytes(r, "big"))
 
-print(chunk_bytes(header, 5))
+#print(chunk_bytes(header, 5))
+
+#print(parse_flags("ack    =  1 urg = 0 cki  =      1"))
+
+#a = b"\xff"
+#a =  int.from_bytes(a, "big")
+#print(a)
+#b = 128 & 127
+#print(b)
+
+#a = b""
+#print(len(a))
