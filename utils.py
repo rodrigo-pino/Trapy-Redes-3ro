@@ -10,12 +10,20 @@ def parse_address(address:str):
 
     return host, int(port)
 
-def address_to_bytes(address) -> bytes:
+def from_address_to_bytes(address) -> bytes:
     address = address.split('.')
     byte_address = bytes()
     for n in address:
         byte_address += int(n).to_bytes(1,"big")
     return byte_address
+
+def from_bytes_to_address(address:bytes) -> str:
+    #result = ""
+    #for byte in address:
+    #    result += str(byte) + "."
+    result = ".".join(str(byte) for byte in address)
+    #print("Address to bytes",result)
+    return result#[:len(result)-1]
 
 def chunk_bytes(data:bytes, mtu:int=572):
     data_chunk = []
@@ -100,3 +108,6 @@ def calculate_checksum(header:bytes) -> bytes:
 
 #a = b""
 #print(len(a))
+
+#a = from_bytes_to_address(b"\xff\xff\xff\xaf")
+#print(a)
