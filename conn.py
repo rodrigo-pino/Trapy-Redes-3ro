@@ -1,22 +1,24 @@
+import signal
 import socket
-from sys import setdlopenflags
 import threading
-from threading import Timer
 import time
 from collections import deque
+from math import ceil
 from random import randint
+from socket import timeout
+from threading import Timer
 from typing import Set, Tuple
 
 from utils import (calculate_checksum, chunk_bytes, from_address_to_bytes,
                    from_bytes_to_address, from_bytes_to_flags, link_data,
-                   parse_flags, sum_list)
+                   parse_flags, sum_list, handler)
 
 
 class ConnException(Exception):
     pass
 
 class Conn:
-    def __init__(self, sock=None, dest_host_port=None, window_size=2) -> None:
+    def __init__(self, sock=None, dest_host_port=None, mss=2) -> None:
         if sock == None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
             
@@ -27,9 +29,14 @@ class Conn:
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
         
-        self.window_size:int = window_size
-        self.mtu:int = window_size + 40
+        self.window_size:int = 1
+        self.mtu:int = mss + 40
         
+        self.timeout:int = 1
+        self.est_rtt:int = 1
+        self.dev_rtt:int = 0
+        self.sam_out_rtt = 0
+
         self.source_hostport = self.socket.getsockname()
         self.dest_hostport = dest_host_port
 
@@ -52,11 +59,12 @@ class Conn:
         on_flags, off_flags = parse_flags(flags)
         if not "syn" in on_flags and not self.flags["syn"]:
             return -1
-
+        
         connect = self.make_packet(b"", (on_flags, off_flags))
         self.secnum += 1
         self.i_secnum = self.secnum
         self.socket.sendto(connect, self.dest_hostport)
+        self.sam_out_rtt = time.time()
         return 1
     
     def send_control(self, flags:str):
@@ -88,8 +96,10 @@ class Conn:
             data = self.send_data[current]
             packet = self.make_packet(data, (on_flags, off_flags))
             self.socket.sendto(packet, self.dest_hostport)
+            if self.sam_out_rtt < 50:
+                self.sam_out_rtt = time.time()
             self.secnum += len(data)
-            self.resend_list.append((current,packet))
+            self.resend_list.append((current, packet))
             
             while current == self.send_index + self.max_send:
                 pass
@@ -98,21 +108,39 @@ class Conn:
     
     def resend(self):
         while True:
-            time.sleep(0.1)
+            time.sleep(self.timeout)
+            count = 0
             for i, packet in self.resend_list:
                 if self.acknowledged[i]:
+                    count += 1
                     self.resend_list.remove((i, packet))
                 else:
                     self.socket.sendto(packet, self.dest_hostport)
+    
+    def recv_control(self):
+        while True:
+            self.recv(self.recv_data_total)
             
     def recv(self, lenght:int):
+        #signal.signal(signal.SIGALRM, handler)
         while self.recv_data_total <= lenght:
-            packet = self.socket.recv(self.mtu)
+            print("Timeout After",self.timeout)
+            signal.alarm(ceil(self.timeout))
+            packet = None
+            try:
+                packet = self.socket.recv(self.mtu)
+                signal.alarm(0)
+            except TimeoutError:
+                print("Timeout Error",self.timeout)
+                self.timeout *= 2
+                print("Timeout Updated", self.timeout)
+                continue
             try:
                 packet = self.decode_packet(packet)
             except ConnException:
+                print("Bad Package", packet)
                 continue
-            
+
             data, source, dest, secnum, acknum, flags = packet
             
             if dest != self.socket.getsockname() or source != self.dest_hostport:
@@ -125,6 +153,7 @@ class Conn:
                 if "syn" in flags:
                     self.acknum = secnum + 1
                     self.i_acknum = acknum
+                    self.update_timeout()
                     if "ack" in flags:
                         return 1
                     return 0
@@ -134,6 +163,7 @@ class Conn:
                 self.total_sent = acknum - self.i_secnum
                 for i in range(self.send_index, min(len(self.acknowledged), self.send_index + self.max_send)):
                     if self.total_sent >= self.sum_data[i]:
+                        self.update_timeout()
                         self.acknowledged[i] = True
                         self.send_index += 1
                     else:
@@ -165,10 +195,12 @@ class Conn:
     def close(self):
         self.socket.close()
         self.socket = None
-    
-    def recv_control(self):
-        while True:
-            self.recv(self.recv_data_total)
+
+    def update_timeout(self):
+        sam_in_rtt = time.time() - self.sam_out_rtt
+        self.est_rtt = 0.875*self.est_rtt + 0.125*sam_in_rtt
+        self.dev_rtt = 0.75*self.dev_rtt + 0.25*abs(sam_in_rtt - self.est_rtt)
+        self.timeout =  self.est_rtt + 4*self.dev_rtt
 
     def set_flags(self, flags, temp = False) -> bytes:
         if isinstance(flags, str):

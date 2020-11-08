@@ -1,6 +1,8 @@
 import enum
-from math import ceil
+from math import ceil, modf
+from random import sample
 from threading import Thread
+from time import sleep
 from typing import Optional, Sized
 import re
 
@@ -89,6 +91,8 @@ def sum_list(data:list):
         sum.append(prev)
     return sum
 
+def handler(signum, frame):
+    raise TimeoutError()
 
 #a = 3
 #b = a.to_bytes(2, "big")
@@ -140,12 +144,13 @@ def sum_list(data:list):
 #import time
 #def a(b:int, c:int):
 #    print("Am here")
-#    while True:
-#        print("Hey")
-#        time.sleep(3)
+#    sleep(3)
 #        
 #t = Thread(target=a,args=(3,4), daemon=True)
 
+#t.start()
+#print("CC")
+#t.join()
 
 #while True:
 #    if not t.is_alive():
@@ -154,3 +159,16 @@ def sum_list(data:list):
 #    time.sleep(3)
 
 #print("And Here")
+
+#def a():
+#    signal.signal(signal.SIGALRM, handler2)
+#    signal.alarm(3)
+#    try:
+#        time.sleep(10)
+#        print("zzz")
+#    except TimeoutError:
+#        print("Awake")
+#    print("Hachus")
+#    signal.alarm(0)
+
+#a()

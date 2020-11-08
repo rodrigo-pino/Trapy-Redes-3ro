@@ -42,10 +42,8 @@ def recv(conn:Conn, length:int):
 def close(conn: Conn):
     conn.close()
 
-# todo: Verificar nuevamente los acknum y los secnum
-# todo: ver para que sirve el tamanno de ventana y utilizarlo como corresponde
-# todo: implementar ttl o el tiempo que se espera por un paquete
-# todo: cuando se hace send verificar que estamos enviando el paquete correcto en caso de haber habido perdida
-# todo: poder enviar varios paquetes a la vez dependiendo del ancho de banda (Eso tiene que ver con hiperthreading)
+# todo: implementar time_out 
 # todo: implementar como trabajar con la congestion de paquetes
+# todo: Enviar varios paquetes a la vez
+# todo: establecer varias conexiones a la vez
 # todo: refactor
