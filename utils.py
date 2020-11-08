@@ -1,5 +1,7 @@
+import enum
 from math import ceil
-from typing import Optional
+from threading import Thread
+from typing import Optional, Sized
 import re
 
 def parse_address(address:str):
@@ -25,11 +27,11 @@ def from_bytes_to_address(address:bytes) -> str:
     #print("Address to bytes",result)
     return result#[:len(result)-1]
 
-def chunk_bytes(data:bytes, mtu:int=572):
+def chunk_bytes(data:bytes, size:int):
     data_chunk = []
-    n = ceil(len(data)/mtu)
+    n = ceil(len(data)/size)
     for i in range(n):
-        data_chunk.append(data[i*mtu:(i+1)*mtu])
+        data_chunk.append(data[i*size:(i+1)*size])
     
     return data_chunk
 
@@ -41,12 +43,12 @@ def parse_flags(flags:str):
         on_flags[i] = on_flags[i][0:3]
     for i in range(len(off_flags)):
         off_flags[i] = off_flags[i][0:3]
-    return (on_flags, off_flags)
+    return (set(on_flags), set(off_flags))
 
-def from_bytes_to_flags(flags_bytes:bytes):
+def from_bytes_to_flags(flags_bytes):
     flags = [(128,"cwr"), (64,"ece"), (32,"urg"), (16,"ack"), (8,"psh"), (4,"rst"), (2,"syn"), (1,"fin")]
     on_flags = set()
-    num = int.from_bytes(flags_bytes, "big")
+    num = int.from_bytes(flags_bytes, "big") if isinstance(flags_bytes, bytes) else flags_bytes
     for bit, flag in flags:
         if num & bit:
             on_flags.add(flag)
@@ -68,6 +70,24 @@ def calculate_checksum(header:bytes) -> bytes:
     
     return (~checksum + 2**16).to_bytes(2, "big")
 
+def link_data(data:list, total_data:int, sparse_data:dict) -> int:
+    for secnum in sparse_data:
+        if secnum < total_data:
+            sparse_data.pop(secnum)
+        elif secnum == total_data:
+            value = sparse_data.pop(secnum)
+            total_data += len(value)
+            data.append(value)
+            return link_data(data, total_data, sparse_data)
+    return total_data
+
+def sum_list(data:list):
+    sum = []
+    prev = 0
+    for chunk in data:
+        prev += len(chunk)
+        sum.append(prev)
+    return sum
 
 
 #a = 3
@@ -96,7 +116,8 @@ def calculate_checksum(header:bytes) -> bytes:
 #r = calculate_checksum(header, "none")
 #print(int.from_bytes(r, "big"))
 
-#print(chunk_bytes(header, 5))
+#aaa = b"hola preciosa"
+#print(chunk_bytes(aaa, 2))
 
 #print(parse_flags("ack    =  1 urg = 0 cki  =      1"))
 
@@ -111,3 +132,25 @@ def calculate_checksum(header:bytes) -> bytes:
 
 #a = from_bytes_to_address(b"\xff\xff\xff\xaf")
 #print(a)
+
+#a = [1,2,3,"a"]
+#for i, j in enumerate(a):
+#    print(i,j)
+
+#import time
+#def a(b:int, c:int):
+#    print("Am here")
+#    while True:
+#        print("Hey")
+#        time.sleep(3)
+#        
+#t = Thread(target=a,args=(3,4), daemon=True)
+
+
+#while True:
+#    if not t.is_alive():
+#        t.start()
+#    print("And Here")
+#    time.sleep(3)
+
+#print("And Here")

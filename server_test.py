@@ -1,5 +1,4 @@
-import sys, getopt
-from trapy import *
+
 
 #from mininet.node import CPULimitedHost
 #from mininet.net import Mininet
@@ -40,15 +39,23 @@ from trapy import *
 #if __name__ == "__main__":
 #    main(sys.argv[1:])
 
+import sys, getopt
+from trapy import *
+
 host = "10.0.0.1"
 #host = "0.0.0.0"
 port = 6
 
 print("-------------SERVER---------------")
+server = listen(host + f":{port}")
 while True:
-    server = listen(host + f":{port}")
-
     server_1 = accept(server)
-    send(server_1, bytes("hola preciosa", "utf8"), mtu=40)
+    if server_1 == None:
+        continue
+    send(server_1, bytes("01234567890", "utf8"))
     print("----------------END-----------------\n")
+    close(server_1)
+    break
+
+close(server)
 
