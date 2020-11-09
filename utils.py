@@ -91,8 +91,19 @@ def sum_list(data:list):
         sum.append(prev)
     return sum
 
-def handler(signum, frame):
-    raise TimeoutError()
+def rearrange_data(data:list, window_size:int):
+    index = 0
+
+def obtain_chunk(data:bytes, window_size:int, index:int):
+    result = data[index:index + window_size]
+    index = index + window_size
+    return result, index
+
+def unify_byte_list(data:list):
+    unify = b""
+    for i in data:
+        unify += i
+    return unify
 
 #a = 3
 #b = a.to_bytes(2, "big")

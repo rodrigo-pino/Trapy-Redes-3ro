@@ -3,7 +3,7 @@ import socket
 from typing import Tuple
 
 from conn import Conn, ConnException
-from utils import chunk_bytes, parse_address
+from utils import chunk_bytes, parse_address, unify_byte_list
 
 
 def listen(address: str) -> Conn:
@@ -39,12 +39,11 @@ def send(conn:Conn, data:bytes) -> int:
 def recv(conn:Conn, length:int):
     result = conn.recv(length)
     conn.reset_recv_values()
-    return result
+    return unify_byte_list(result)
 
 def close(conn: Conn):
     conn.close()
 
-# todo: organizar datos que lleguen en orden
 # todo: enviar y recibir paquetes que funcione
 # todo: implementar como trabajar con la congestion de paquetes
 # todo: establecer varias conexiones a la vez
