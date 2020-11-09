@@ -7,10 +7,11 @@ print("-------------CLIENT--------------")
 client = dial(host + f":{port}")
 if client:
     while True:
-        val = "1234"#input("Input Data:")
+        val = "0123456789l"
+        #val = input("Input Data:")
         send(client, bytes(val,"utf8"))
-        print("Data Sent", val)
-        r = recv(client, 40)
-        print("Data Recieved", r)
-        break
+        print("*******Data Sent***********\n", val)
+        r = recv(client, 10)
+        print("*******Data Recieved*******\n", r)
+        print("----------Succeded-----------")
     close(client)

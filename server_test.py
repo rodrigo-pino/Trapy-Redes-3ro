@@ -50,11 +50,12 @@ print("-------------SERVER---------------")
 server = listen(host + f":{port}")
 server_1 = accept(server)
 while server_1 != None:
-    r = recv(server_1, 40)
-    print("Data Recieved", r)
+    r = recv(server_1, 10)
+    print("*******Data Recieved*******\n", r)
     send(server_1, r)
-    print("Data Sent", r)
-    break
+    print("*******Data Sent***********\n", r)
+    print("----------Succeded-----------")
 
+close(server_1)
 close(server)
 

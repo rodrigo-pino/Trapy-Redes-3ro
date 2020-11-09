@@ -11,7 +11,7 @@ from typing import Set, Tuple
 
 from utils import (calculate_checksum, chunk_bytes, from_address_to_bytes,
                    from_bytes_to_address, from_bytes_to_flags, link_data,
-                   parse_flags, sum_list, obtain_chunk)
+                   parse_flags, sum_list, obtain_chunk, unify_byte_list)
 
 
 class ConnException(Exception):
@@ -21,35 +21,31 @@ class Conn:
     def __init__(self, sock=None, dest_host_port=None, mss=2) -> None:
         if sock == None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-            
         self.socket:socket.socket = sock
+        
         
         self.secnum:int = randint(0, 100)
         self.acknum:int = 0
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
         
-        self.window_size:int = 1
+        self.window_size:int = 2
         self.mtu:int =  40 + self.window_size        
         self.timeout:int = 1
         self.est_rtt:int = 1
         self.dev_rtt:int = 0
-        self.sam_out_rtt:int = 0
 
         self.source_hostport = self.socket.getsockname()
         self.dest_hostport = dest_host_port
 
-        self.flags = {"cwr":False, "ece":False, "urg":False, "ack":False, "psh":False, "rst":False, "syn":False, "fin":False}
+        self.flags = {"cwr":False, "ece":False, "urg":False, "ack":False, "las":False, "rst":False, "syn":False, "fin":False}
 
-        self.send_data = None
-        self.acknowledged = None
         self.unacknowledge = deque()
-        self.sum_data = None
-        self.resend_list = None
         self.total_sent = 0
         self.send_index = 0
-        self.max_send = 1
-        self.sending = True
+        self.max_send = 5
+        self.sending = False
+        self.stop_sending_secnum:int = 0
 
         self.recv_data_total = 0
         self.recv_data = []
@@ -80,16 +76,17 @@ class Conn:
         return 1
 
     def send(self, data:bytes, flags:str=""):
+        print("PREPARING TO SEND")
         on_flags, off_flags = parse_flags(flags)
         self.total_sent = 0
         self.total_ack = 0
         self.unacknowledge = deque()
+        self.stop_sending_secnum = 0
 
         self.sending = True
         t_control = threading.Thread(target=self.recv_control, daemon=True)
         t_control.start()
-
-        while self.total_ack < len(data):
+        while self.total_ack < len(data) and self.sending:
             chunk, self.total_sent = obtain_chunk(data, self.window_size, self.total_sent)
             if self.total_sent == len(data):
                 on_flags.add("fin")
@@ -97,9 +94,12 @@ class Conn:
             self.secnum += len(chunk)
             self.socket.sendto(packet, self.dest_hostport)
             self.unacknowledge.appendleft((packet, self.secnum, (time.time(), self.timeout)))
-            while len(self.unacknowledge) == self.max_send:
+            while len(self.unacknowledge) == self.max_send and self.sending:
                 self.resend()
         
+        if not self.sending:
+            self.secnum = self.stop_sending_secnum
+
         self.sending = False
 
     def resend(self):
@@ -111,7 +111,7 @@ class Conn:
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
             if time.time() > send_time + limit_time:
-                print("Resending")
+                print("Resending", self.unacknowledge)
                 self.socket.sendto(packet, self.dest_hostport)
                 send_time = time.time()
                 limit_time *= 2
@@ -119,77 +119,38 @@ class Conn:
         self.unacknowledge = aux_list
         self.stop1 = True
 
-
-    def send1(self, data, flags:str=""):
-        on_flags, off_flags = parse_flags(flags)
-        self.send_data = chunk_bytes(data, self.window_size) if isinstance(data, bytes) else data
-        self.acknowledged = [False for i in range(len(self.send_data))]
-        self.sum_data = sum_list(self.send_data)
-        send_list =[]
-        for data in self.send_data:
-            send_list.append(self.make_packet(data, (on_flags, off_flags)))
-            self.secnum += len(data)
-        
-        end_pack = self.make_packet(b"l","fin=1")
-        self.secnum += len(data)
-        send_list.append(end_pack)
-
-        self.sending = True
-        t_control = threading.Thread(target=self.recv_control, daemon=True)
-        t_control.start()
-
-        #send_list.sort(key=lambda x:randint(0,1))
-        for i in range(len(send_list)):
-            try:
-                print("Sending", send_list[i][-1])
-            except: print("Sending l")
-            self.socket.sendto(send_list[i], self.dest_hostport)
-            while i == self.send_index + self.max_send:
-                pass
-
-        self.sending = False
-
-    def send2(self, data, flags:str=""):
-        on_flags, off_flags = parse_flags(flags)
-        self.sending = True
-        self.send_data = chunk_bytes(data, self.window_size) if isinstance(data, bytes) else data
-        self.acknowledged = [False for i in range(len(self.send_data))]
-        self.sum_data = sum_list(self.send_data)
-        self.resend_list =[]
-        
-        #t_control = threading.Thread(target=self.recv_control, daemon=True)
-        #t_control.start()
-
-        current = 0
-        while current < len(self.send_data) :
-            if current == len(self.send_data) - 1:
-                on_flags.add("fin")
-            
-            data = self.send_data[current]
-            packet = self.make_packet(data, (on_flags, off_flags))
-            self.socket.sendto(packet, self.dest_hostport)
-            if self.sam_out_rtt < 50:
-                self.sam_out_rtt = time.time()
-            self.secnum += len(data)
-            self.resend_list.append((current, packet))
-            
-            #while current == self.send_index + self.max_send:
-                #self.resend()
-
-            current += 1
-        
-        #while len(self.resend_list):
-            #self.resend()
-
-        self.sending = False
-        return 1
-    
-    
     def recv_control(self):
         while self.sending:
-            self.recv(self.recv_data_total)
-            
-
+            packet = self.socket.recv(40)
+            try:
+                packet = self.decode_packet(packet)
+            except ConnException:
+                print("Bad Package", packet)
+                continue
+            data, source, dest, secnum, acknum, flags = packet
+            if dest != self.socket.getsockname() or source != self.dest_hostport:
+                print("wrong destination")
+                continue
+            if "ack" in flags:
+                print("Ack Recieved", acknum, "total sent", self.total_sent, "total acknowldgd", self.total_ack)
+                while not self.stop1 or not self.stop2:
+                    pass
+                if "fin" in flags:
+                    print("Recieved Termination",self.unacknowledge)
+                    self.unacknowledge = deque()
+                    self.stop_sending_secnum = acknum
+                    self.sending = False
+                    return
+                self.stop2 = False
+                for j in range(len(self.unacknowledge)):
+                    i = len(self.unacknowledge) - (j + 1)
+                    _, expected_ack, (send_time,_) = self.unacknowledge[i]
+                    print("acknum",acknum, "expected_ack",expected_ack)
+                    if acknum == expected_ack:
+                        self.total_ack = acknum - self.i_secnum;print("Total Ack updated",self.total_ack)
+                        self.unacknowledge.pop()
+                        self.update_timeout(send_time)
+                self.stop2 = True
 
     def recv_connect(self):
         if not self.flags["syn"]:
@@ -221,9 +182,9 @@ class Conn:
         return 0
         
     def recv(self, lenght:int):
-        print("length", lenght)
+        print("PREPARING TO RECIEVE")
         end_of_conn = 0
-        while self.recv_data_total <= lenght:
+        while self.recv_data_total < lenght:
             packet = self.socket.recv(self.mtu)
             try:
                 packet = self.decode_packet(packet)
@@ -235,21 +196,8 @@ class Conn:
                 print("wrong destination")
                 continue
             print("recv",data)
-            if "ack" in flags:
-                print("Ack Recieved", acknum, "total sent", self.total_sent, "total acknowldgd", self.total_ack)
-                while not self.stop1 or not self.stop2:
-                    pass
-                self.stop2 = False
-                for j in range(len(self.unacknowledge)):
-                    i = len(self.unacknowledge) - (j + 1)
-                    _, expected_ack, (send_time,_) = self.unacknowledge[i]
-                    print("acknum",acknum, "expected_ack",expected_ack)
-                    if acknum == expected_ack:
-                        self.total_ack = acknum - self.i_secnum;print("Total Ack updated",self.total_ack)
-                        self.unacknowledge.pop()
-                        self.update_timeout(send_time)
-                self.stop2 = True
 
+            print("recieving secnum",secnum,"self.acknum",self.acknum)
             if secnum == self.acknum and len(data) > 0:
                 print("Saved Data", data)
                 self.acknum += len(data)
@@ -262,8 +210,10 @@ class Conn:
                 self.send_control("ack = 1")
                 print("Sending Ack", self.acknum)
                 if end_of_conn == self.acknum:
+                    break
                     return self.recv_data
             elif secnum > self.acknum and len(data) > 0:
+                print("Adding to ahead packages")
                 try:
                     self.ahead_packages[secnum]
                     continue
@@ -272,12 +222,18 @@ class Conn:
                     if "fin" in flags:
                         end_of_conn = secnum + len(data)
                     continue
-            elif len(data) > 0:
-                continue
+            elif secnum < self.acknum and len(data) > 0:
+                print("Sending ACK due to old package arrival")
+                self.send_control("ack = 1")
             
             if "fin" in flags:
+                break
                 return self.recv_data
-        return self.recv_data
+        
+        self.send_control("ack = 1 fin = 1")
+        print("sent termination")
+        self.i_secnum = self.secnum
+        return unify_byte_list(self.recv_data)
 
     def reset_recv_values(self):
         self.recv_data = []
@@ -302,7 +258,7 @@ class Conn:
         else:
             on_flags, off_flags = flags[0], flags[1]
 
-        flags_bytes = {"cwr":128, "ece":64, "urg":32, "ack":16, "psh":8, "rst":4, "syn":2, "fin":1}
+        flags_bytes = {"cwr":128, "ece":64, "urg":32, "ack":16, "las":8, "rst":4, "syn":2, "fin":1}
 
         if not temp:
             for flag in on_flags:

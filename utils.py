@@ -48,7 +48,7 @@ def parse_flags(flags:str):
     return (set(on_flags), set(off_flags))
 
 def from_bytes_to_flags(flags_bytes):
-    flags = [(128,"cwr"), (64,"ece"), (32,"urg"), (16,"ack"), (8,"psh"), (4,"rst"), (2,"syn"), (1,"fin")]
+    flags = [(128,"cwr"), (64,"ece"), (32,"urg"), (16,"ack"), (8,"las"), (4,"rst"), (2,"syn"), (1,"fin")]
     on_flags = set()
     num = int.from_bytes(flags_bytes, "big") if isinstance(flags_bytes, bytes) else flags_bytes
     for bit, flag in flags:
@@ -96,7 +96,7 @@ def rearrange_data(data:list, window_size:int):
 
 def obtain_chunk(data:bytes, window_size:int, index:int):
     result = data[index:index + window_size]
-    index = index + window_size
+    index = min(index + window_size, len(data))
     return result, index
 
 def unify_byte_list(data:list):
@@ -201,4 +201,8 @@ def unify_byte_list(data:list):
 #a = [b"5",b"0",b"1",b"2",b"3",b"4"]
 #func = lambda x: randint(0,1)
 #a.sort(key=func,)
+#print(a)
+
+#a = [1,2,3]
+#a = a[0:4]
 #print(a)

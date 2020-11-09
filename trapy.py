@@ -39,7 +39,7 @@ def send(conn:Conn, data:bytes) -> int:
 def recv(conn:Conn, length:int):
     result = conn.recv(length)
     conn.reset_recv_values()
-    return unify_byte_list(result)
+    return result
 
 def close(conn: Conn):
     conn.close()
