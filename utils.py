@@ -1,6 +1,6 @@
 import enum
 from math import ceil, modf
-from random import sample
+from random import randint, sample
 from threading import Thread
 from time import sleep
 from typing import Optional, Sized
@@ -142,10 +142,11 @@ def handler(signum, frame):
 #    print(i,j)
 
 #import time
+#from threading import Thread
 #def a(b:int, c:int):
-#    print("Am here")
-#    sleep(3)
-#        
+    #print("Am here")
+    #sleep(3)
+
 #t = Thread(target=a,args=(3,4), daemon=True)
 
 #t.start()
@@ -172,3 +173,21 @@ def handler(signum, frame):
 #    signal.alarm(0)
 
 #a()
+
+#data = []
+#total_data = 1034
+#sparse_data = {1038:"e", 1040:"f", 1035:"b", 1036:"c", 1042:"g", 1034:"a", 1037:"d"}
+
+#total_data = link_data(data, total_data, sparse_data)
+#print(data)
+#print(total_data)
+
+#def a():
+#    return 1,2,3
+#_,_,b=a()
+#print(b)
+
+#a = [b"5",b"0",b"1",b"2",b"3",b"4"]
+#func = lambda x: randint(0,1)
+#a.sort(key=func,)
+#print(a)

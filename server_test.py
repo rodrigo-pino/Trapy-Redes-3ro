@@ -48,13 +48,12 @@ port = 6
 
 print("-------------SERVER---------------")
 server = listen(host + f":{port}")
-while True:
-    server_1 = accept(server)
-    if server_1 == None:
-        continue
-    send(server_1, bytes("01234567890", "utf8"))
-    print("----------------END-----------------\n")
-    close(server_1)
+server_1 = accept(server)
+while server_1 != None:
+    r = recv(server_1, 40)
+    print("Data Recieved", r)
+    send(server_1, r)
+    print("Data Sent", r)
     break
 
 close(server)
