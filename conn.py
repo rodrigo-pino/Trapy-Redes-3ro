@@ -29,7 +29,7 @@ class Conn:
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
         
-        self.window_size:int = 2
+        self.window_size:int = 30
         self.mtu:int =  40 + self.window_size        
         self.timeout:int = 1
         self.est_rtt:int = 1
@@ -52,8 +52,7 @@ class Conn:
         self.recv_index = -1
         self.ahead_packages = dict()
 
-        self.stop1 = True
-        self.stop2 = True
+        self.lock = threading.Lock()
 
     def send_connect(self, flags:str):
         on_flags, off_flags = parse_flags(flags)
@@ -94,7 +93,7 @@ class Conn:
             self.secnum += len(chunk)
             self.socket.sendto(packet, self.dest_hostport)
             self.unacknowledge.appendleft((packet, self.secnum, (time.time(), self.timeout)))
-            while len(self.unacknowledge) == self.max_send and self.sending:
+            while (len(self.unacknowledge) == self.max_send or self.total_sent == len(data)) and self.sending:
                 self.resend()
         
         if not self.sending:
@@ -103,21 +102,18 @@ class Conn:
         self.sending = False
 
     def resend(self):
-        while not self.stop1 or not self.stop2:
-            pass
-        self.stop1 = False
         aux_list = deque()
+        self.lock.acquire()
         for j in range(len(self.unacknowledge)):
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
             if time.time() > send_time + limit_time:
-                print("Resending", self.unacknowledge)
                 self.socket.sendto(packet, self.dest_hostport)
                 send_time = time.time()
                 limit_time *= 2
             aux_list.appendleft((packet, expected_ack, (send_time, limit_time)))
+        self.lock.release()
         self.unacknowledge = aux_list
-        self.stop1 = True
 
     def recv_control(self):
         while self.sending:
@@ -133,24 +129,25 @@ class Conn:
                 continue
             if "ack" in flags:
                 print("Ack Recieved", acknum, "total sent", self.total_sent, "total acknowldgd", self.total_ack)
-                while not self.stop1 or not self.stop2:
-                    pass
+                self.lock.acquire()
                 if "fin" in flags:
                     print("Recieved Termination",self.unacknowledge)
                     self.unacknowledge = deque()
                     self.stop_sending_secnum = acknum
                     self.sending = False
+                    self.lock.release()
                     return
-                self.stop2 = False
+                aux_list = deque()
                 for j in range(len(self.unacknowledge)):
                     i = len(self.unacknowledge) - (j + 1)
                     _, expected_ack, (send_time,_) = self.unacknowledge[i]
                     print("acknum",acknum, "expected_ack",expected_ack)
-                    if acknum == expected_ack:
+                    if acknum >= expected_ack:
                         self.total_ack = acknum - self.i_secnum;print("Total Ack updated",self.total_ack)
-                        self.unacknowledge.pop()
                         self.update_timeout(send_time)
-                self.stop2 = True
+                    else: aux_list.appendleft(self.unacknowledge[i])
+                self.unacknowledge = aux_list
+                self.lock.release()
 
     def recv_connect(self):
         if not self.flags["syn"]:

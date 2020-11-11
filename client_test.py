@@ -6,8 +6,7 @@ port = 6
 print("-------------CLIENT--------------")
 client = dial(host + f":{port}")
 if client:
-    while True:
-        val = "0123456789l"
+    for val in ["a", "0123456789", "#0123456789ABCDEF"]:
         #val = input("Input Data:")
         send(client, bytes(val,"utf8"))
         print("*******Data Sent***********\n", val)
