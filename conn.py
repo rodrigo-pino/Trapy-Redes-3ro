@@ -18,7 +18,7 @@ class ConnException(Exception):
     pass
 
 class Conn:
-    def __init__(self, sock=None, dest_host_port=None, mss=2) -> None:
+    def __init__(self, sock=None, dest_host_port=None, recv_buffer_size=2048) -> None:
         if sock == None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         self.socket:socket.socket = sock
@@ -29,8 +29,6 @@ class Conn:
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
         
-        self.window_size:int = 30
-        self.mtu:int =  40 + self.window_size        
         self.timeout:int = 1
         self.est_rtt:int = 1
         self.dev_rtt:int = 0
@@ -40,16 +38,22 @@ class Conn:
 
         self.flags = {"cwr":False, "ece":False, "urg":False, "ack":False, "las":False, "rst":False, "syn":False, "fin":False}
 
+        self.sending:bool = False
         self.unacknowledge = deque()
-        self.total_sent = 0
-        self.send_index = 0
-        self.max_send = 5
-        self.sending = False
+        self.total_sent:int = 0
         self.stop_sending_secnum:int = 0
 
-        self.recv_data_total = 0
+        self.send_index:int = 0
+        self.max_send:int = 1
+        self.send_window:int = 1
+        self.max_transm:int =  40 + self.send_window
+        self.threshold:int  = -1
+        self.fast_recovery:bool = False
+
+        self.recv_window:int = 1
+        self.recv_data_total:int = 0
+        self.recv_buffer_size:int = recv_buffer_size
         self.recv_data = []
-        self.recv_index = -1
         self.ahead_packages = dict()
 
         self.lock = threading.Lock()
@@ -86,7 +90,7 @@ class Conn:
         t_control = threading.Thread(target=self.recv_control, daemon=True)
         t_control.start()
         while self.total_ack < len(data) and self.sending:
-            chunk, self.total_sent = obtain_chunk(data, self.window_size, self.total_sent)
+            chunk, self.total_sent = obtain_chunk(data, self.recv_window, self.total_sent)
             if self.total_sent == len(data):
                 on_flags.add("fin")
             packet = self.make_packet(chunk,(on_flags, off_flags))
@@ -100,6 +104,25 @@ class Conn:
             self.secnum = self.stop_sending_secnum
 
         self.sending = False
+    
+    def increase_sending_rate(self):
+        if self.fast_recovery and self.threshold != (0,0):
+            pass
+        elif self.threshold != (0,0) and self.send_window >= int(self.threshold[0]/2) and self.max_send >= int(self.threshold[1])/2:
+            self.send_window += 1
+        else:
+            self.send_window += 1
+            self.max_send += 1
+
+    def congestion_control(self):
+        if self.fast_recovery and self.threshold != (0,0):
+            pass
+        elif self.threshold != (0,0) and self.send_window >= int(self.threshold[0]/2) and self.max_send >= int(self.threshold[1])/2:
+            self.send_window -= 1
+        else:
+            self.threshold = (self.send_window, self.max_send)
+            self.send_window = 1
+            self.max_send = 1
 
     def resend(self):
         aux_list = deque()
@@ -108,6 +131,7 @@ class Conn:
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
             if time.time() > send_time + limit_time:
+                self.congestion_control()
                 self.socket.sendto(packet, self.dest_hostport)
                 send_time = time.time()
                 limit_time *= 2
@@ -153,7 +177,7 @@ class Conn:
         if not self.flags["syn"]:
             return -1
 
-        packet = self.socket.recv(self.mtu)
+        packet = self.socket.recv(self.max_transm)
         try:
             packet = self.decode_packet(packet)
         except ConnException:
@@ -182,7 +206,7 @@ class Conn:
         print("PREPARING TO RECIEVE")
         end_of_conn = 0
         while self.recv_data_total < lenght:
-            packet = self.socket.recv(self.mtu)
+            packet = self.socket.recv(self.max_transm)
             try:
                 packet = self.decode_packet(packet)
             except ConnException:
@@ -193,7 +217,6 @@ class Conn:
                 print("wrong destination")
                 continue
             print("recv",data)
-
             print("recieving secnum",secnum,"self.acknum",self.acknum)
             if secnum == self.acknum and len(data) > 0:
                 print("Saved Data", data)
@@ -225,19 +248,11 @@ class Conn:
             
             if "fin" in flags:
                 break
-                return self.recv_data
         
         self.send_control("ack = 1 fin = 1")
         print("sent termination")
         self.i_secnum = self.secnum
         return unify_byte_list(self.recv_data)
-
-    def reset_recv_values(self):
-        self.recv_data = []
-        self.recv_data_total = 0
-        self.recv_index = -1
-        self.ahead_packages = dict()
-
 
     def close(self):
         self.socket.close()
@@ -284,7 +299,7 @@ class Conn:
         acknowledge_num = self.acknum.to_bytes(4, "big")
 
         flags = self.set_flags(tcp_flags, temp=True)
-        window_size  = self.mtu.to_bytes(2, "big")
+        window_size  = self.max_transm.to_bytes(2, "big")
 
         data_offset_reserved = b"\x50"
         urgent_pointer =b"\x00\x00" 

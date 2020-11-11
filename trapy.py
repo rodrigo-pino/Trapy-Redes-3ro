@@ -44,11 +44,10 @@ def recv(conn:Conn, length:int):
 def close(conn: Conn):
     conn.close()
 
-# todo: goback previous commit
-# todo: chequear que al rcv llega el mensaje que debe
-# todo: Enviar varios paquetes a la vez. Problema con el tamanno de la ventana y los thread. Probar con varios tamannos.
-# todo: Despues de completado lo anterior probar con tamanno 1. Poooor si acaaaso. pinga
-# todo: implementar como trabajar con la congestion de paquetes
+# todo: implementar flow control
+# todo: Implementar Congestion de paquetes
+# todo: Establecer 3 way handshake correctamente. Importancia de este.
 # todo: establecer varias conexiones a la vez
 # todo: si el ack y el sec son muy grandes que sean modulo de 2**n -1
 # todo: refactor
+# todo: test with unittest
