@@ -13,39 +13,26 @@ def listen(address: str) -> Conn:
     return conn
 
 def accept(conn: Conn) -> Conn:
-    if not conn.flags["syn"]:
-        conn.set_flags("syn = 1")
-    syn = conn.recv_connect()
-    if isinstance(syn, int) and syn == 0:
-        conn.set_flags("syn = 0")
-        new_conn = conn.dup()
-        new_conn.send_connect("ack = 1 syn = 1")
-        return new_conn
+    return conn.accept()
 
 def dial(address: str) -> Conn:
-    addr = parse_address(address)
-    conn = Conn(dest_host_port=addr)
+    conn = Conn()
     conn.socket.bind(("10.0.0.2",6))
-    conn.set_flags("syn = 1")
-    conn.send_connect("")
-    synack = conn.recv_connect()
-    if isinstance(synack, int) and synack == 1:
-        conn.set_flags("syn = 0")
-        return conn
+    conn.connect(address)
+    return conn
 
-def send(conn:Conn, data:bytes) -> int:
+def send(conn:Conn, data:bytes) -> None:
     return conn.send(data)
 
-def recv(conn:Conn, length:int):
+def recv(conn:Conn, length:int) -> Tuple[int, bytes]:
     result = conn.recv(length)
-    return result
+    return len(result), result
 
 def close(conn: Conn):
     conn.close()
 
+# todo: Hacer el connect y el accept persistentes, o sea si hay perdida de un mensaje reenviar
 # todo: implementar flow control
-# todo: Establecer 3 way handshake correctamente. Importancia de este.
-# todo: establecer varias conexiones a la vez
-# todo: si el ack y el sec son muy grandes que sean modulo de 2**n -1
+# todo: Maybe add timeouts to avoid hanging for ever for a transmission
 # todo: refactor
 # todo: test with unittest
