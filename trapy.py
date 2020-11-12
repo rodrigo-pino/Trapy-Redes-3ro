@@ -38,14 +38,12 @@ def send(conn:Conn, data:bytes) -> int:
 
 def recv(conn:Conn, length:int):
     result = conn.recv(length)
-    conn.reset_recv_values()
     return result
 
 def close(conn: Conn):
     conn.close()
 
 # todo: implementar flow control
-# todo: Implementar Congestion de paquetes
 # todo: Establecer 3 way handshake correctamente. Importancia de este.
 # todo: establecer varias conexiones a la vez
 # todo: si el ack y el sec son muy grandes que sean modulo de 2**n -1

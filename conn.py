@@ -18,7 +18,7 @@ class ConnException(Exception):
     pass
 
 class Conn:
-    def __init__(self, sock=None, dest_host_port=None, recv_buffer_size=2048) -> None:
+    def __init__(self, sock=None, dest_host_port=None) -> None:
         if sock == None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         self.socket:socket.socket = sock
@@ -44,15 +44,16 @@ class Conn:
         self.stop_sending_secnum:int = 0
 
         self.send_index:int = 0
-        self.max_send:int = 1
-        self.send_window:int = 1
-        self.max_transm:int =  40 + self.send_window
+        self.cong_window:int = 1
+        self.max_segment:int = 10
+        self.max_transm:int =  40 + self.max_segment
         self.threshold:int  = -1
+        self.recv_last_acknum:tuple = (-1, -1)
         self.fast_recovery:bool = False
+        
 
         self.recv_window:int = 1
         self.recv_data_total:int = 0
-        self.recv_buffer_size:int = recv_buffer_size
         self.recv_data = []
         self.ahead_packages = dict()
 
@@ -85,19 +86,28 @@ class Conn:
         self.total_ack = 0
         self.unacknowledge = deque()
         self.stop_sending_secnum = 0
+        
+        self.cong_window:int = 1
+        self.max_segment:int = 10
+        self.max_transm:int =  40 + self.max_segment
+        self.threshold:tuple  = (-1, -1)
+        self.recv_last_acknum:tuple = (-1, -1)
+        self.slow_start = True
+        self.cong_avoid:bool = False
+        self.fast_recovery:bool = False
 
         self.sending = True
         t_control = threading.Thread(target=self.recv_control, daemon=True)
         t_control.start()
         while self.total_ack < len(data) and self.sending:
-            chunk, self.total_sent = obtain_chunk(data, self.recv_window, self.total_sent)
+            chunk, self.total_sent = obtain_chunk(data, self.max_segment, self.total_sent)
             if self.total_sent == len(data):
                 on_flags.add("fin")
-            packet = self.make_packet(chunk,(on_flags, off_flags))
+            packet = self.make_packet(chunk,(on_flags, off_flags));print("Sending size",len(chunk))
             self.secnum += len(chunk)
             self.socket.sendto(packet, self.dest_hostport)
             self.unacknowledge.appendleft((packet, self.secnum, (time.time(), self.timeout)))
-            while (len(self.unacknowledge) == self.max_send or self.total_sent == len(data)) and self.sending:
+            while (len(self.unacknowledge) >= self.cong_window or self.total_sent == len(data)) and self.sending:
                 self.resend()
         
         if not self.sending:
@@ -106,23 +116,30 @@ class Conn:
         self.sending = False
     
     def increase_sending_rate(self):
-        if self.fast_recovery and self.threshold != (0,0):
-            pass
-        elif self.threshold != (0,0) and self.send_window >= int(self.threshold[0]/2) and self.max_send >= int(self.threshold[1])/2:
-            self.send_window += 1
-        else:
-            self.send_window += 1
-            self.max_send += 1
+        if self.slow_start or (self.threshold != -1 and self.cong_window < int(self.threshold)):
+            self.cong_window *= 2
+        elif self.cong_avoid:
+            self.cong_window += 1
+        
 
-    def congestion_control(self):
-        if self.fast_recovery and self.threshold != (0,0):
-            pass
-        elif self.threshold != (0,0) and self.send_window >= int(self.threshold[0]/2) and self.max_send >= int(self.threshold[1])/2:
-            self.send_window -= 1
-        else:
-            self.threshold = (self.send_window, self.max_send)
-            self.send_window = 1
-            self.max_send = 1
+    def congestion_control(self, timeout=False, triple_ack = False):
+        if self.slow_start or (self.threshold != -1 and self.cong_window < int(self.threshold)):
+            self.threshold = int(self.cong_window/2)
+            self.cong_window = 1
+            self.slow_start = False
+            self.cong_window = True
+        elif self.cong_avoid:
+            if timeout:
+                self.threshold = int(self.cong_window/2)
+                self.cong_window = 1
+                self.cong_avoid = False
+                self.slow_start = True
+            elif triple_ack:
+                self.threshold = int(self.cong_window/2)
+                self.cong_window /= 2
+                #self.cong_avoid = False
+                #self.fast_recovery = True
+
 
     def resend(self):
         aux_list = deque()
@@ -131,7 +148,7 @@ class Conn:
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
             if time.time() > send_time + limit_time:
-                self.congestion_control()
+                self.congestion_control(timeout=True)
                 self.socket.sendto(packet, self.dest_hostport)
                 send_time = time.time()
                 limit_time *= 2
@@ -152,10 +169,9 @@ class Conn:
                 print("wrong destination")
                 continue
             if "ack" in flags:
-                print("Ack Recieved", acknum, "total sent", self.total_sent, "total acknowldgd", self.total_ack)
                 self.lock.acquire()
+                self.update_last_acknum(acknum)
                 if "fin" in flags:
-                    print("Recieved Termination",self.unacknowledge)
                     self.unacknowledge = deque()
                     self.stop_sending_secnum = acknum
                     self.sending = False
@@ -165,13 +181,24 @@ class Conn:
                 for j in range(len(self.unacknowledge)):
                     i = len(self.unacknowledge) - (j + 1)
                     _, expected_ack, (send_time,_) = self.unacknowledge[i]
-                    print("acknum",acknum, "expected_ack",expected_ack)
                     if acknum >= expected_ack:
-                        self.total_ack = acknum - self.i_secnum;print("Total Ack updated",self.total_ack)
+                        self.total_ack = acknum - self.i_secnum
                         self.update_timeout(send_time)
                     else: aux_list.appendleft(self.unacknowledge[i])
                 self.unacknowledge = aux_list
                 self.lock.release()
+    
+    def update_last_acknum(self,new_acknum:int):
+        old_acknum, times = self.recv_last_acknum
+        if old_acknum != new_acknum:
+            self.increase_sending_rate()
+            self.recv_last_acknum = (new_acknum, 0)
+            return
+        times += 1
+        if times >= 3:
+            self.congestion_control(triple_ack=True)
+        self.recv_last_acknum = (old_acknum, times)
+
 
     def recv_connect(self):
         if not self.flags["syn"]:
@@ -203,6 +230,11 @@ class Conn:
         return 0
         
     def recv(self, lenght:int):
+        self.recv_window:int = 1
+        self.recv_data_total:int = 0
+        self.recv_data = []
+        self.ahead_packages = dict()
+
         print("PREPARING TO RECIEVE")
         end_of_conn = 0
         while self.recv_data_total < lenght:
@@ -216,14 +248,12 @@ class Conn:
             if dest != self.socket.getsockname() or source != self.dest_hostport:
                 print("wrong destination")
                 continue
-            print("recv",data)
-            print("recieving secnum",secnum,"self.acknum",self.acknum)
+
             if secnum == self.acknum and len(data) > 0:
                 print("Saved Data", data)
                 self.acknum += len(data)
                 self.recv_data_total += len(data)
                 self.recv_data.append(data)
-                self.recv_index += 1
                 if len(self.ahead_packages):
                     self.acknum = link_data(self.recv_data, self.acknum, self.ahead_packages)
                     self.recv_data_total = self.acknum - self.i_acknum
@@ -233,7 +263,7 @@ class Conn:
                     break
                     return self.recv_data
             elif secnum > self.acknum and len(data) > 0:
-                print("Adding to ahead packages")
+                print("Adding to ahead packages", data)
                 try:
                     self.ahead_packages[secnum]
                     continue
@@ -243,14 +273,13 @@ class Conn:
                         end_of_conn = secnum + len(data)
                     continue
             elif secnum < self.acknum and len(data) > 0:
-                print("Sending ACK due to old package arrival")
+                print("Re-Sending ACK due to old package arrival")
                 self.send_control("ack = 1")
             
             if "fin" in flags:
                 break
         
         self.send_control("ack = 1 fin = 1")
-        print("sent termination")
         self.i_secnum = self.secnum
         return unify_byte_list(self.recv_data)
 
@@ -292,7 +321,7 @@ class Conn:
 
 
     def make_packet(self, data:bytes, tcp_flags) -> bytes:
-        source_port = self.socket.getsockname()[1].to_bytes(2, "big");print(f"Sending self.acknum {self.acknum} self.secnum {self.secnum}")
+        source_port = self.socket.getsockname()[1].to_bytes(2, "big")
         dest_port = self.dest_hostport[1].to_bytes(2, "big")
 
         sequence_num = self.secnum.to_bytes(4, "big") 
