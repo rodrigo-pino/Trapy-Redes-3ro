@@ -12,16 +12,17 @@ def listen(address: str) -> Conn:
     conn.socket.bind(addr)
     return conn
 
-def accept(conn: Conn) -> Conn:
+def accept(conn: Conn):
     return conn.accept()
 
-def dial(address: str) -> Conn:
+def dial(address: str):
     conn = Conn()
     conn.socket.bind(("10.0.0.2",6))
-    conn.connect(address)
-    return conn
+    if conn.connect(address) == 1:
+        return conn
+    return None
 
-def send(conn:Conn, data:bytes) -> None:
+def send(conn:Conn, data:bytes) -> int:
     return conn.send(data)
 
 def recv(conn:Conn, length:int) -> Tuple[int, bytes]:
@@ -31,8 +32,6 @@ def recv(conn:Conn, length:int) -> Tuple[int, bytes]:
 def close(conn: Conn):
     conn.close()
 
-# todo: Hacer el connect y el accept persistentes, o sea si hay perdida de un mensaje reenviar
+# todo: En caso de recibir un paqete final mas del que nos interesa, botarlo
+# todo: No enviar mas paquetes de los que puede el reciever. Annadirlo en los header
 # todo: implementar flow control
-# todo: Maybe add timeouts to avoid hanging for ever for a transmission
-# todo: refactor
-# todo: test with unittest

@@ -1,10 +1,8 @@
-import enum
-from math import ceil, modf
-from random import randint, sample
-from threading import Thread
-from time import sleep
-from typing import Optional, Sized
 import re
+import shlex
+import subprocess
+from math import ceil
+
 
 def parse_address(address:str):
     host, port = address.split(':')
@@ -22,12 +20,8 @@ def from_address_to_bytes(address) -> bytes:
     return byte_address
 
 def from_bytes_to_address(address:bytes) -> str:
-    #result = ""
-    #for byte in address:
-    #    result += str(byte) + "."
     result = ".".join(str(byte) for byte in address)
-    #print("Address to bytes",result)
-    return result#[:len(result)-1]
+    return result
 
 def chunk_bytes(data:bytes, size:int):
     data_chunk = []
@@ -72,16 +66,19 @@ def calculate_checksum(header:bytes) -> bytes:
     
     return (~checksum + 2**16).to_bytes(2, "big")
 
-def link_data(data:list, total_data:int, sparse_data:dict) -> int:
+def link_data(data:list, acknum:int, sparse_data:dict, max_acknum:int) -> int:
+    if acknum >= max_acknum:
+        return acknum
+
     for secnum in sparse_data:
-        if secnum < total_data:
+        if secnum < acknum:
             sparse_data.pop(secnum)
-        elif secnum == total_data:
+        elif secnum == acknum:
             value = sparse_data.pop(secnum)
-            total_data += len(value)
+            acknum += len(value)
             data.append(value)
-            return link_data(data, total_data, sparse_data)
-    return total_data
+            return link_data(data, acknum, sparse_data, max_acknum)
+    return acknum
 
 def sum_list(data:list):
     sum = []
@@ -104,6 +101,18 @@ def unify_byte_list(data:list):
     for i in data:
         unify += i
     return unify
+
+def get_source_ip(host):
+    this = subprocess.check_output(shlex.split(f"ip route get to {host}"))
+
+    temp1 = str(this, "utf8").split("src")
+    temp2 = temp1[1].split("uid")
+    
+    return temp2[0].split()[0]
+
+def get_secuence_num(header:bytes) -> int:
+    secnum = header[4:8]
+    return int.from_bytes(secnum, "big")
 
 #a = 3
 #b = a.to_bytes(2, "big")
