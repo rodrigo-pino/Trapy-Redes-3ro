@@ -1,6 +1,7 @@
 import re
 import shlex
 import subprocess
+import logging
 from math import ceil
 
 
@@ -114,6 +115,16 @@ def get_secuence_num(header:bytes) -> int:
     secnum = header[4:8]
     return int.from_bytes(secnum, "big")
 
+def set_log_level(level:str) -> int:
+    level = level.lower()
+    levels = {"debug":logging.DEBUG, "info":logging.INFO, "warning":logging.WARNING, "error":logging.ERROR,"critical":logging.CRITICAL}
+    try:
+        severity = levels[level]
+    except KeyError:
+        logging.error("Level \'%s\' is unknow, set \'warning\' as default severity level.",level)
+        return logging.WARNING
+    return severity
+
 #a = 3
 #b = a.to_bytes(2, "big")
 #print("len",len(b))
@@ -215,3 +226,11 @@ def get_secuence_num(header:bytes) -> int:
 #a = [1,2,3]
 #a = a[0:4]
 #print(a)
+
+#import logging
+#logging.basicConfig(filename="example.log", filemode="w", level=logging.DEBUG)
+#logging.basicConfig(format="%(levelname)s:%(message)s ", level=logging.DEBUG)
+#logging.debug("Debug")
+#logging.warning("Warning")
+#logging.info("Info")
+#logging.error("Error")
