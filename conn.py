@@ -1,4 +1,5 @@
 from logging import debug, log
+import re
 import socket
 from socket import socketpair
 import threading
@@ -18,7 +19,7 @@ class ConnException(Exception):
     pass
 
 class Conn:
-    def __init__(self, sock = None, max_segment_size:int = 1000, loglevel:str = "critical") -> None:
+    def __init__(self, sock = None, max_segment_size:int = 1000, loglevel:str = "debug") -> None:
         if sock == None:
             sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         
@@ -31,6 +32,8 @@ class Conn:
         self.acknum:int = 0
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
+        self.max_segment:int = max_segment_size
+        self.dynamic_segment_size:int = max_segment_size
         
         self.timeout:int = 1
         self.est_rtt:int = 1
@@ -46,7 +49,7 @@ class Conn:
         self.initialize_recv_variables()
 
         level = set_log_level(loglevel)
-        logging.basicConfig(format="%(levelname)s:%(message)s", level=level)
+        logging.basicConfig(format="%(levelname)s: %(message)s", level=level)
 
     
     def listen(self, max_conn):
@@ -55,9 +58,10 @@ class Conn:
         self.server = True
         self.bound_conns = [None for _ in range(max_conn)]
     
-    def accept(self):
+    def accept(self, max_segment_size=1000):
         assert self.client == False, "Error! Clients cannot accept connections."
         conn = self.start_child()
+        conn.max_segment = max_segment_size
         conn.server = True
 
         for i in range(len(self.bound_conns)):
@@ -194,21 +198,20 @@ class Conn:
 
     def send(self, data:bytes, flags:str="") -> int:
         logging.info("PREPARING TO SEND")
-        logging.debug("self.secnum: %s self.acknum: %s", self.secnum, self.acknum)
+        logging.debug("self.secnum: %s self.acknum: %s dynamic_window %s", self.secnum, self.acknum, self.dynamic_segment_size)
         self.initialize_send_variables()
         t_control = threading.Thread(target=self.recv_control, daemon=True)
         on_flags, off_flags = parse_flags(flags)
         self.sending = True
         t_control.start()
         while self.total_ack < len(data) and self.sending:
-            logging.debug("Max bytes aloud to send: %s", self.aloud_to_send)
             local_timeout = time.time() + 10 + self.timeout
-            chunk, self.total_sent = obtain_chunk(data, min(self.max_segment, self.aloud_to_send), self.total_sent)
+            chunk, self.total_sent = obtain_chunk(data, min(self.dynamic_segment_size, len(data) - self.total_sent), self.total_sent)
             if self.total_sent == len(data):
                 logging.debug("Sending Final Package")
                 on_flags.add("fin")
             packet = self.make_packet(chunk,(on_flags, off_flags))
-            logging.debug("Sending size %s",len(chunk))
+            logging.debug("Sending size %s dynamic window %s",len(chunk), self.dynamic_segment_size)
             self.secnum += len(chunk)
             self.socket.sendto(packet, self.dest_hostport)
             self.lock.acquire()
@@ -219,29 +222,30 @@ class Conn:
                 if local_timeout - time.time() < 0:
                     logging.error("Timeout ocurred while sending. Stopped sending data.")
                     self.sending = False
-                    self.secnum = self.last_ack_sec if self.last_ack_sec != -1 else self.secnum
+                    self.secnum = self.recv_last_acknum[0] if self.recv_last_acknum[0] != -1 else self.secnum
                     logging.debug("self.secnum: %s",self.secnum)
                     return self.total_ack
                 if self.total_ack >= len(data):
                     break
                 self.resend()
         logging.debug("self.total_ack: %s len(data): %s self.sending: %s", self.total_ack, len(data), self.sending)
-        self.secnum = self.last_ack_sec if self.last_ack_sec != -1 else self.secnum
+        self.secnum = self.recv_last_acknum[0] if self.recv_last_acknum[0] != -1 else self.secnum
         self.sending = False
         return self.total_ack
 
     def resend(self):
-        logging.debug("Re-sending data, unacknowledge packets = %s",len(self.unacknowledge))
+        #logging.debug("Re-sending data, unacknowledge packets = %s",len(self.unacknowledge))
         aux_list = deque()
         self.lock.acquire()
         for j in range(len(self.unacknowledge)):
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
             if time.time() > send_time + limit_time:
-                self.congestion_control(timeout=True)
+                if limit_time:
+                    self.congestion_control(timeout=True)
                 self.socket.sendto(packet, self.dest_hostport)
                 send_time = time.time()
-                limit_time *= 2
+                limit_time = limit_time*2 if limit_time else self.timeout
             aux_list.appendleft((packet, expected_ack, (send_time, limit_time)))
         self.lock.release()
         self.unacknowledge = aux_list
@@ -280,21 +284,29 @@ class Conn:
                     logging.info("Recieved Termination Control.")
                     self.unacknowledge = deque()
                     self.total_ack = acknum - self.i_secnum
-                    self.last_ack_sec = acknum
                     self.sending = False
                     self.lock.release()
                     return
-                if acknum > self.last_ack_sec:
-                    self.last_ack_sec = acknum
                 aux_list = deque()
                 for j in range(len(self.unacknowledge)):
                     i = len(self.unacknowledge) - (j + 1)
-                    _, expected_ack, (send_time,_) = self.unacknowledge[i]
-                    logging.debug("Recieving ACK: %s and was expecting: %s.", acknum, expected_ack)
+                    pack, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
+                    pack_secnum = int.from_bytes(pack[4:8],"big")
+                    logging.debug("Recieving ACK: %s and was expecting: %s and pack_Secnum: %s.", acknum, expected_ack, pack_secnum)
                     if acknum >= expected_ack:
                         self.total_ack = acknum - self.i_secnum
                         self.update_timeout(send_time)
-                    else: aux_list.appendleft(self.unacknowledge[i])
+                    elif pack_secnum < acknum:
+                        logging.debug("***Recieved Piece(%s) pack_secnum: %s recv_acknum: %s", acknum-pack_secnum, pack_secnum, acknum)
+                        self.dynamic_segment_size = min(acknum - pack_secnum, self.dynamic_segment_size)
+                        pack_secnum_new = pack_secnum + acknum - pack_secnum
+                        pack = self.make_packet(data=pack[20 + acknum - pack_secnum:], tcp_flags=pack[12:13], secnum=pack_secnum_new)
+                        logging.debug("Rearrenging packet: secnum: %s expected: %s data_size: %s",pack_secnum, expected_ack, len(pack[20:]))
+                        pack = (pack, expected_ack, (time.time(), 0))
+                        aux_list.append(pack)
+                        self.update_timeout(send_time)
+                    else: 
+                        aux_list.appendleft(self.unacknowledge[i])
                 self.unacknowledge = aux_list
                 logging.debug("len(self.unacknowledge): %s", len(self.unacknowledge))
                 self.lock.release()
@@ -328,12 +340,13 @@ class Conn:
                 logging.debug("This process sends to %s and has address %s.", self.dest_hostport, self.socket.getsockname())
                 logging.debug("But it recieved a package from  %s that was sent to %s.", source, dest)
                 continue
-            logging.debug("Recieved Data")
+            logging.debug("Recieved Data(%s) secnum: %s acknum: %s", len(data), secnum, acknum)
+            logging.debug("self.secnum %s self.acknum %s", self.secnum, self.acknum)
             if secnum == self.acknum and len(data) > 0:
                 local_timeout = time.time() + 10 + self.timeout
                 logging.debug("Data saved to buffer")
-                self.acknum += len(data)
-                self.recv_data_total += len(data)
+                self.acknum = self.acknum + len(data) if self.acknum + len(data) < max_acknum else max_acknum
+                self.recv_data_total = self.acknum - self.i_acknum
                 self.recv_data.append(data)
                 if len(self.ahead_packages):
                     self.acknum = link_data(self.recv_data, self.acknum, self.ahead_packages, max_acknum)
@@ -409,11 +422,14 @@ class Conn:
 
     def update_last_acknum(self,new_acknum:int):
         old_acknum, times = self.recv_last_acknum
-        if old_acknum != new_acknum:
+        if old_acknum < new_acknum:
             self.increase_sending_rate()
             self.recv_last_acknum = (new_acknum, 0)
             return
+        elif old_acknum > new_acknum:
+            return
         times += 1
+        self.recv_last_acknum = (old_acknum, times)
         if times >= 3:
             self.congestion_control(triple_ack=True)
 
@@ -428,7 +444,7 @@ class Conn:
         if isinstance(flags, str):
             on_flags, off_flags = parse_flags(flags)
         else:
-            on_flags, off_flags = flags[0], flags[1]
+            on_flags, off_flags = flags
 
         flags_bytes = {"cwr":128, "ece":64, "urg":32, "ack":16, "las":8, "rst":4, "syn":2, "fin":1}
 
@@ -450,14 +466,14 @@ class Conn:
         
         return num.to_bytes(1, "big")
 
-    def make_packet(self, data:bytes, tcp_flags) -> bytes:
+    def make_packet(self, data:bytes, tcp_flags, secnum:int = None) -> bytes:
         source_port = self.socket.getsockname()[1].to_bytes(2, "big")
         dest_port = self.dest_hostport[1].to_bytes(2, "big")
 
-        sequence_num = self.secnum.to_bytes(4, "big") 
+        sequence_num = self.secnum.to_bytes(4, "big") if not secnum else secnum.to_bytes(4, "big")
         acknowledge_num = self.acknum.to_bytes(4, "big")
 
-        flags = self.set_flags(tcp_flags, temp=True)
+        flags = self.set_flags(tcp_flags, temp=True) if not isinstance(tcp_flags, bytes) else tcp_flags
         recv_window  = b"\x00\x00" #self.available_buffer.to_bytes(2, "big")
 
         data_offset_reserved = b"\x50"
@@ -510,7 +526,6 @@ class Conn:
         self.i_secnum = self.secnum
         self.i_acknum = self.acknum
         self.sending = False
-        self.max_segment:int = 1000
         self.max_transm:int = 40 + self.max_segment
         self.total_sent = 0
         self.total_ack = 0

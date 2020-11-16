@@ -69,11 +69,11 @@ def calculate_checksum(header:bytes) -> bytes:
 
 def link_data(data:list, acknum:int, sparse_data:dict, max_acknum:int) -> int:
     if acknum >= max_acknum:
-        return acknum
-
+        return max_acknum
     for secnum in sparse_data:
         if secnum < acknum:
             sparse_data.pop(secnum)
+            return link_data(data, acknum, sparse_data, max_acknum)
         elif secnum == acknum:
             value = sparse_data.pop(secnum)
             acknum += len(value)
@@ -88,9 +88,6 @@ def sum_list(data:list):
         prev += len(chunk)
         sum.append(prev)
     return sum
-
-def rearrange_data(data:list, window_size:int):
-    index = 0
 
 def obtain_chunk(data:bytes, window_size:int, index:int):
     result = data[index:index + window_size]

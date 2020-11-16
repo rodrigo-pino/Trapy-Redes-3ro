@@ -13,11 +13,11 @@ def listen(address: str, max_connections:int = 1) -> Conn:
     conn.listen(max_connections)
     return conn
 
-def accept(conn: Conn):
+def accept(conn: Conn, max_segment_size:int = 1000):
     return conn.accept()
 
-def dial(address: str):
-    conn = Conn()
+def dial(address: str, max_segment_size = 1000):
+    conn = Conn(max_segment_size=max_segment_size)
     if conn.connect(address) == 1:
         return conn
     return None
@@ -35,7 +35,4 @@ def close(conn: Conn):
 # todo: pulir congestion control
 # todo: ver si recv_last_acknum y la otra que se parece, pueden unirse
 # todo: Ver que voy a hace con el recv window al final
-# todo: Manejar varios conexiones a la vez
-# todo: Hacer un snapshot con todos los prints, o um modo verbose
-# todo: bw en wl cli de mininet que significa
 # todo: implementar flow control
