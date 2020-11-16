@@ -73,7 +73,9 @@ class Conn:
                 break
         else:
             logging.error("Maximum number of concurrent connections already reached.")
-            return
+            time.sleep(2)
+            return None
+        
         
         while True:
             syn_segment:int = conn.recv_connect(1)
@@ -81,7 +83,8 @@ class Conn:
                 break
             logging.info("Error while recieving SYN segment, retrying.")
         
-        while True:
+        local_timeout = time.time() + 10 + conn.timeout
+        while time.time() < local_timeout:
             conn.send_connect(2)
             conn.socket.settimeout(conn.timeout)
             try:
@@ -89,17 +92,17 @@ class Conn:
                 ack_segment = conn.recv_connect(3)
                 if ack_segment == 3:
                     break
+                logging.info(f"Failed to connect with {conn.dest_hostport}. Retrying")
                 conn.secnum -= 1
             except socket.timeout:
                 conn.secnum -= 1
                 conn.timeout *= 2
-                logging.error("Timeout ocurred while waiting for ACK segment, retrying.")
+                logging.info("Timeout ocurred while waiting for ACK segment, retrying.")
                 logging.debug("Timeout updated to %s",str(conn.timeout))
-        
-        if ack_segment != 3:
-            logging.error(f"Failed to connect with {conn.dest_hostport}. Aborting")
+        else:
+            logging.error("Timeout ocurred while waiting for ACK segment. Aborting.")
             return None
-        
+
         conn.socket.settimeout(None)
         return conn
     
@@ -110,7 +113,8 @@ class Conn:
         ip_addr = get_source_ip("10.0.0.0")
         self.socket.bind((ip_addr, 0))
         count = 1
-        while True:
+        local_timeout = time.time() + 10 + self.timeout
+        while time.time() < local_timeout:
             self.send_connect(1)
             self.socket.settimeout(self.timeout)
             try:
@@ -144,7 +148,7 @@ class Conn:
         elif step == 3 and self.client:
             flags = "ack = 1"
         else:
-            logging.error("Unexpected exception while sending connection segment.(%s)", step)
+            logging.info("Unexpected exception while sending connection segment.(%s)", step)
             return -1
         logging.debug("self.secnum: %s   self.acknum: %s", self.secnum, self.acknum)
         connect = self.make_packet(b"", flags)
