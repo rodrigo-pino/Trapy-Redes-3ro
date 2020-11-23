@@ -1,146 +1,133 @@
-from logging import debug, log
-import re
-import socket
-from socket import socketpair
-import threading
-import time
 from collections import deque
-from math import ceil
-from random import randint
-from typing import Set, Tuple
 import logging
+from math import ceil
+from socket import timeout
+from conn_old import ConnException
+import socket
+import time
+from random import randint
+from utils import calculate_checksum, from_address_to_bytes, from_bytes_to_address, from_bytes_to_flags, link_data, obtain_chunk, parse_address, parse_flags
+from logging import debug, error, info, warning
+from threading import Thread, Lock
 
-from utils import (calculate_checksum, from_bytes_to_address,
-                   from_bytes_to_flags, link_data, obtain_chunk, parse_address,
-                   parse_flags, set_log_level, unify_byte_list, get_source_ip)
+logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.CRITICAL)
 
-
-class ConnException(Exception):
-    pass
-
-class Conn:
-    def __init__(self, sock = None, max_segment_size:int = 1000, take_from_buffer:int = 1000, loglevel:str = "debug") -> None:
-        if sock == None:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-        
-        self.socket:socket.socket = sock
+class Conn():
+    def __init__(self, logger=None) -> None:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
         self.server:bool = False
         self.client:bool = False
         self.bound_conns:list = []
+        self.source_hostport = ("",0)
+        self.dest_hostport = ("",0)
 
         self.secnum:int = randint(0, 100)
         self.acknum:int = 0
         self.i_secnum:int = self.secnum
         self.i_acknum:int = 0
-        self.max_segment:int = max_segment_size
-        self.dynamic_segment_size:int = max_segment_size
-        self.take_from_buffer:int = take_from_buffer
-        
+        self.max_segment:int = 1040#max_segment_size
+        self.recv_window:int = 1040
+        self.dynamic_segment_size:int = self.max_segment
+
         self.timeout:int = 1
         self.est_rtt:int = 1
         self.dev_rtt:int = 0
 
-        self.source_hostport:Tuple[str,int] = self.socket.getsockname()
-        self.dest_hostport:Tuple[str,int] = ("",0)
-
         self.flags = {"cwr":False, "ece":False, "urg":False, "ack":False, "las":False, "rst":False, "syn":False, "fin":False}
-        self.lock = threading.Lock()
+        self.mutex = Lock()
 
         self.initialize_send_variables()
         self.initialize_recv_variables()
+        self.SEND_TIMEOUT = 30
+        self.RECV_TIMEOUT = 30
+        
 
-        level = set_log_level(loglevel)
-        logging.basicConfig(format="%(levelname)s: %(message)s", level=level)
-
-    
-    def listen(self, max_conn):
+    def listen(self, address:str, conn_number:int):
         assert self.client == False, "Error! Clients cannot listen for connections."
         assert self.server == False, "Error! Servers can only listen once."
         self.server = True
-        self.bound_conns = [None for _ in range(max_conn)]
+        self.source_hostport = parse_address(address)
+        self.bound_conns = [None for _ in range(conn_number - 1)]
     
-    def accept(self, max_segment_size:int=1000, take_from_buffer:int=1000):
+    def accept(self):
         assert self.client == False, "Error! Clients cannot accept connections."
-        conn = self.start_child()
-        conn.max_segment = max_segment_size
-        conn.take_from_buffer = take_from_buffer
+        assert self.server == True, "Error! Server must listen before accepting connections."
+        
+        while self.recv_connect(1) != 1:
+            info("Error while recieving SYN segment, retrying")
+        #print("SYN succesfully recived from", self.dest_hostport)
+        conn = Conn()
         conn.server = True
+        conn.source_hostport = self.source_hostport
+        conn.dest_hostport = self.dest_hostport
+        conn.secnum = self.secnum
+        conn.acknum = self.acknum
 
+        print("Conn bounds",[i == None or i.socket == None for i in self.bound_conns])
         for i in range(len(self.bound_conns)):
-            connection = self.bound_conns[i]
-            if connection == None or connection.socket == None:
+            stored_conn = self.bound_conns[i]
+            if stored_conn == None or stored_conn.socket == None:
                 self.bound_conns[i] = conn
                 break
         else:
-            logging.error("Maximum number of concurrent connections already reached.")
+            warning("Maximum number of concurrent connections already reached.")
             time.sleep(2)
             return None
-        
-        
-        while True:
-            syn_segment:int = conn.recv_connect(1)
-            if syn_segment == 1:
-                break
-            logging.info("Error while recieving SYN segment, retrying.")
-        
-        local_timeout = time.time() + 10 + conn.timeout
+        local_timeout = time.time() + 15 + conn.timeout
         while time.time() < local_timeout:
             conn.send_connect(2)
             conn.socket.settimeout(conn.timeout)
             try:
                 conn.secnum += 1
-                ack_segment = conn.recv_connect(3)
-                if ack_segment == 3:
+                if conn.recv_connect(3) == 3:
                     break
-                logging.info(f"Failed to connect with {conn.dest_hostport}. Retrying")
                 conn.secnum -= 1
+                info("Error while recieving ACK segment, retrying.")
             except socket.timeout:
                 conn.secnum -= 1
                 conn.timeout *= 2
-                logging.info("Timeout ocurred while waiting for ACK segment, retrying.")
-                logging.debug("Timeout updated to %s",str(conn.timeout))
+                info("Timeout while waiting for ACK segment, retrying")
         else:
-            logging.error("Timeout ocurred while waiting for ACK segment. Aborting.")
+            error("Timeout ocurred while waiting for ACK, aborting")
+            conn.socket.settimeout(None)
             return None
-
+        #print("im herre5")
         conn.socket.settimeout(None)
+        info("Three-Way Handshake Completed")
         return conn
-    
+
     def connect(self, address:str):
         assert self.server == False, "Error! Server cannot be client."
         self.client = True
         self.dest_hostport = parse_address(address)
-        ip_addr = get_source_ip("10.0.0.0")
-        self.socket.bind((ip_addr, 0))
-        count = 1
-        local_timeout = time.time() + 10 + self.timeout
+        total_timeouts = 1
+        local_timeout = time.time() + 15 + self.timeout
         while time.time() < local_timeout:
             self.send_connect(1)
             self.socket.settimeout(self.timeout)
             try:
                 self.secnum += 1
-                synack_segment = self.recv_connect(2)
-                if synack_segment == 2:
+                if self.recv_connect(2) == 2:
                     break
                 self.secnum -= 1
-                logging.info("Error while recieving SYNACK segment, retrying.")
+                info("Error while recieving SYNACK segment, retrying")
             except socket.timeout:
                 self.secnum -= 1
-                if count < 32:
-                    count *= 2
-                self.timeout *= 2
-                logging.info("Timeout ocurred while waiting for ACK segment, retrying.")
-                logging.debug("Timeout updated to %s",str(self.timeout))
-
-        for _ in range(count):
+                total_timeouts *= 2 if total_timeouts < 32 else 1 
+                self.timeout*=2
+                info("Timeout ocurred while waiting for ACK segment, retrying.")
+        else:
+            self.socket.settimeout(None)
+            return 0
+        for _ in range(total_timeouts):
             self.send_connect(3)
         self.secnum += 1
 
+        info("Three-Way Handshake completed, hopefully.")
         self.socket.settimeout(None)
         return 1
-    
+
     def send_connect(self, step:int):
-        logging.debug(">>>>SEND STEP: %s", step)
         if step == 1 and self.client:
             flags = "syn = 1"
         elif step == 2 and self.server:
@@ -148,266 +135,283 @@ class Conn:
         elif step == 3 and self.client:
             flags = "ack = 1"
         else:
-            logging.info("Unexpected exception while sending connection segment.(%s)", step)
-            return -1
-        logging.debug("self.secnum: %s   self.acknum: %s", self.secnum, self.acknum)
-        connect = self.make_packet(b"", flags)
-        self.socket.sendto(connect, self.dest_hostport)
-        self.unacknowledge.appendleft((connect, self.secnum, (time.time(), self.timeout)))
+            return 0
+        
+        packet = self.pack(b"", flags)
+        self.socket.sendto(packet, (self.dest_hostport[0],0))
+        self.unacknowledge.appendleft(time.time())
         return step
 
     def recv_connect(self, step:int):
-        logging.debug("<<<<RECV STEP: %s", step)
-        packet = self.socket.recv(40)
+        packet, addr = self.socket.recvfrom(40)
         try:
-            packet = self.decode_packet(packet)
+            _, source, dest, secnum, acknum, flags, recv_window = self.unpack(packet)
         except ConnException:
-            return -1
-        
-        _, source, dest, secnum, acknum, flags, recv_window = packet
-        if dest != self.socket.getsockname():
-            logging.warning(f"Wrong Address, infromation was sent to {dest} instead of {self.socket.getsockname()}.")
-            return self.recv_connect(step)
-        if source != self.dest_hostport:
+            return 0
+
+        if dest[0] != self.source_hostport[0]:
+            if self.client and step == 2 and self.source_hostport == ("",0):
+                self.source_hostport = dest
+            else:
+                info(f"Wrong Address, information was meant to {dest} instead of this({self.source_hostport}).")
+
+        if source[0] != self.dest_hostport[0]:
             if self.server and step == 1:
                 self.dest_hostport = source
             elif self.client and step == 2 and source[0] == self.dest_hostport[0]:
                 self.dest_hostport = source
             else:
-                logging.warning(f"Wrong Address, infromation arrived from {source} instead of {self.dest_hostport}.")
+                info(f"Wrong Address, information arrived from {source} instead of {self.dest_hostport}.")
                 return self.recv_connect(step)
-        
-        self.dynamic_segment_size = min(recv_window, self.max_transm)
+
+        self.dynamic_segment_size = min(recv_window, self.dynamic_segment_size)
         if step == 1 and self.server and "syn" in flags:
             self.acknum = secnum + 1
             return step
         
         if ((step == 2 and self.client and "syn" in flags and "ack" in flags) or (step == 3 and self.server and "ack" in flags)) and self.secnum == acknum:
             self.acknum = secnum + 1 
-            _, _, (send_time, _) = self.unacknowledge.pop()
+            send_time = self.unacknowledge.pop()
             self.update_timeout(send_time)
             return step
-        
-        logging.error("Unexpected exception while recieving connection segment.(%s)", step)
-        return -1
+        return 0
 
-    def send_control(self, flags:str):
-        logging.debug("Sent Control with ack: %s and flags: %s", self.acknum, flags)
-        on_flags, off_flags = parse_flags(flags)
-        if not "ack" in on_flags and not self.flags["ack"]:
-            on_flags.add("ack")
-        control = self.make_packet(b"", (on_flags, off_flags))
-        self.socket.sendto(control, self.dest_hostport)
-        return 1
+    def recv_control(self):
+        #debug("Recieving control")
+        while self.sending:
+            packet, addr = self.socket.recvfrom(65565)
+            if not self.sending:
+                return
+            try:
+                data, source, dest, secnum, acknum, flags, recv_window = self.unpack(packet)
+            except ConnException:            
+                info("A problem ocurred while unpacking")
+                continue
+            if dest[0] != self.source_hostport[0] or source[0] != self.dest_hostport[0]:
+                info("Recieved a package from a different connection.")
+                continue
+            if len(data) > 0:
+                if secnum <= self.acknum:
+                    self.send_control("ack = 1")
+            
+            #debug("self.secnum %s self.acnum %s",self.secnum, self.acknum)
+            #debug("acknum %s self.secnum %s", acknum, secnum)
+            if "fin" in flags:
+                self.mutex.acquire()
+                self.unacknowledge = deque()
+                self.total_ack = acknum - self.i_secnum
+                self.sending = False
+                self.mutex.release()
+                return    
+            if "ack" in flags:
+                #print("im herre control with ack", acknum, "and unacknowlede",len(self.unacknowledge))
+                self.dynamic_segment_size = min(self.max_segment, recv_window)
+                self.mutex.acquire()
+                self.update_last_acknum(acknum)
+                #print("Recieved ack", acknum)
+                aux = deque()
+                for j in range(len(self.unacknowledge)):
+                    i = len(self.unacknowledge) - (j + 1)
+                    pack, expected_ack,(send_time, _) = self.unacknowledge[i]
+                    pack_secnum = int.from_bytes(pack[4:8], "big")
+                    #debug("expected ack %s", expected_ack)
+                    if acknum >= expected_ack:
+                        self.total_ack = acknum - self.i_secnum
+                        self.update_timeout(send_time)
+                    elif pack_secnum < acknum:
+                        pack_size = acknum - pack_secnum
+                        self.dynamic_segment_size = min(pack_size, self.dynamic_segment_size)
+                        #print("Repacking, dynmaic ss", self.dynamic_segment_size)
+                        pack_secnum += pack_size
+                        re_pack = self.pack(data=pack[20 + pack_size:], flags=pack[12:13], secnum=pack_secnum)
+                        aux.append((re_pack, expected_ack, (time.time(), 0)))
+                        self.update_timeout(send_time)
+                    else:
+                        aux.appendleft(self.unacknowledge[i])
+                    #break
+                self.unacknowledge = aux
+                self.mutex.release()
+        #debug("Stoped recieving")
+        #while not self.sending:
+        #    pass
+        #return self.recv_control()        
 
     def send(self, data:bytes, flags:str="") -> int:
-        logging.info("PREPARING TO SEND")
-        logging.debug("self.secnum: %s self.acknum: %s dynamic_window %s", self.secnum, self.acknum, self.dynamic_segment_size)
         self.initialize_send_variables()
-        t_control = threading.Thread(target=self.recv_control, daemon=True)
         on_flags, off_flags = parse_flags(flags)
         self.sending = True
+        total_sent = 0
+        t_control = Thread(target=self.recv_control, daemon=True)
         t_control.start()
         while self.total_ack < len(data) and self.sending:
-            local_timeout = time.time() + 10 + self.timeout
-            chunk, self.total_sent = obtain_chunk(data, min(self.dynamic_segment_size, len(data) - self.total_sent), self.total_sent)
-            if self.total_sent == len(data):
-                logging.debug("Sending Final Package")
-                on_flags.add("fin")
-            packet = self.make_packet(chunk,(on_flags, off_flags))
-            logging.debug("Sending size %s dynamic window %s",len(chunk), self.dynamic_segment_size)
+            local_timeout = time.time() + self.SEND_TIMEOUT + self.timeout
+            chunk, total_sent = obtain_chunk(data, min(self.dynamic_segment_size, len(data) - total_sent), total_sent)
+            #debug("Total sent till now  %s  total ack %s   dynamic_segment_size %s", total_sent, self.total_ack, self.dynamic_segment_size)
+            #if total_sent == len(data):
+                #print("Adding fin to on_flags")
+                #on_flags.add("fin")
+            packet = self.pack(chunk, (on_flags, off_flags))
+            self.socket.sendto(packet, (self.dest_hostport[0], 0))
+            self.mutex.acquire()
             self.secnum += len(chunk)
-            self.socket.sendto(packet, self.dest_hostport)
-            self.lock.acquire()
             self.unacknowledge.appendleft((packet, self.secnum, (time.time(), self.timeout)))
-            self.lock.release()
-            logging.debug("len(unack) >= cong_window: %s total_sent = len(data): %s", len(self.unacknowledge) >= self.cong_window, self.total_sent == len(data))
-            while (len(self.unacknowledge) >= self.cong_window or self.total_sent == len(data)) and self.sending:
+            self.mutex.release()
+
+            #print("len(unacknowledge)",len(self.unacknowledge))
+            while (len(self.unacknowledge) >= self.cong_window or total_sent == len(data)) and self.sending:
                 if local_timeout - time.time() < 0:
-                    logging.error("Timeout ocurred while sending. Stopped sending data.")
+                    error("Timeout Error while sending. Stopping.")
                     self.sending = False
                     self.secnum = self.recv_last_acknum[0] if self.recv_last_acknum[0] != -1 else self.secnum
-                    logging.debug("self.secnum: %s",self.secnum)
                     return self.total_ack
                 if self.total_ack >= len(data):
                     break
                 self.resend()
-        logging.debug("self.total_ack: %s len(data): %s self.sending: %s", self.total_ack, len(data), self.sending)
+        
+        #self.socket.sendto(self.pack(b"", "fin = 1"), (self.dest_hostport[0], 0))
+        #print("Total data acknowledged", self.total_ack, "len de data",len(data), "self.sending",self.sending)
         self.secnum = self.recv_last_acknum[0] if self.recv_last_acknum[0] != -1 else self.secnum
         self.sending = False
         return self.total_ack
 
     def resend(self):
         aux_list = deque()
-        self.lock.acquire()
+        self.mutex.acquire()
+        total_resent = 0
         for j in range(len(self.unacknowledge)):
             i = len(self.unacknowledge) - (j + 1)
             packet, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
-            if time.time() > send_time + limit_time:
-                if limit_time:
+            if time.time() > send_time + limit_time and total_resent <= self.cong_window:
+                if limit_time > 0:
                     self.congestion_control(timeout=True)
-                self.socket.sendto(packet, self.dest_hostport)
+                total_resent += 1
+                self.socket.sendto(packet, (self.dest_hostport[0], 0))
                 send_time = time.time()
-                limit_time = limit_time*2 if limit_time else self.timeout
+                limit_time =limit_time*2 if limit_time else self.timeout
             aux_list.appendleft((packet, expected_ack, (send_time, limit_time)))
-        self.lock.release()
         self.unacknowledge = aux_list
+        self.mutex.release()
 
-    def recv_control(self):
-        while self.sending:
-            packet = self.socket.recv(self.take_from_buffer)
-            if not self.sending:
-                return
-            try:
-                packet = self.decode_packet(packet)
-            except ConnException:
-                logging.info("Problem ocurred while decoding package.")
-                logging.debug("Packet:",packet)
-                continue
-            data, source, dest, secnum, acknum, flags, recv_window = packet
-            if dest != self.socket.getsockname() or source != self.dest_hostport:
-                logging.info("Recieved package from a different connection.")
-                logging.debug("This process sends to %s and has address %s.", self.dest_hostport, self.socket.getsockname())
-                logging.debug("But it recieved a package from  %s that was sent to %s.", source, dest)
-                continue
-            if len(data) > 0:
-                logging.debug("Recieving data while sending. Data secnum: %s self.acknum: %s.", secnum, self.acknum)
-                if secnum > self.acknum:
-                    logging.debug(f"Recieving datal len({len(data)}),{data} doing nothing")
-                else:
-                    logging.debug(f"Recieving Old Data len({len(data)}),{data} re-sending control")
-                    self.send_control("ack = 1")
-            
-            elif "ack" in flags:
-                logging.debug("Recievieng Control data ack=%s, self.secnum=%s and flags=%s",acknum, self.secnum, flags)
-                self.dynamic_segment_size = min(self.max_transm, recv_window)
-                self.lock.acquire()
-                self.update_last_acknum(acknum)
-                if "fin" in flags:
-                    logging.info("Recieved Termination Control.")
-                    self.unacknowledge = deque()
-                    self.total_ack = acknum - self.i_secnum
-                    self.sending = False
-                    self.lock.release()
-                    return
-                aux_list = deque()
-                for j in range(len(self.unacknowledge)):
-                    i = len(self.unacknowledge) - (j + 1)
-                    pack, expected_ack, (send_time, limit_time) = self.unacknowledge[i]
-                    pack_secnum = int.from_bytes(pack[4:8],"big")
-                    logging.debug("Recieving ACK: %s and was expecting: %s and pack_Secnum: %s.", acknum, expected_ack, pack_secnum)
-                    if acknum >= expected_ack:
-                        self.total_ack = acknum - self.i_secnum
-                        self.update_timeout(send_time)
-                    elif pack_secnum < acknum:
-                        size = acknum - pack_secnum
-                        logging.debug("***Recieved Piece(%s) pack_secnum: %s recv_acknum: %s", size, pack_secnum, acknum)
-                        self.dynamic_segment_size = min(size, self.dynamic_segment_size)
-                        #self.total_ack += size
-                        pack_secnum += size
-                        pack = self.make_packet(data=pack[20 + size:], tcp_flags=pack[12:13], secnum=pack_secnum)
-                        logging.debug("Rearrenging packet: secnum: %s expected: %s data_size: %s",pack_secnum, expected_ack, len(pack[20:]))
-                        pack = (pack, expected_ack, (time.time(), 0))
-                        aux_list.append(pack)
-                        self.update_timeout(send_time)
-                    else: 
-                        aux_list.appendleft(self.unacknowledge[i])
-                self.unacknowledge = aux_list
-                logging.debug("len(self.unacknowledge): %s", len(self.unacknowledge))
-                self.lock.release()
-
-    def recv(self, lenght:int) -> bytes:
-        self.sending = False
-        logging.info("PREPARING TO RECIEVE")
-        logging.debug("self.secnum: %s self.acknum: %s", self.secnum, self.acknum)
+    def recv(self, length:int) -> bytes:
         self.initialize_recv_variables()
-        end_of_conn = 0
-        local_timeout = time.time() + 10 + self.timeout
-        max_acknum = self.acknum + lenght
-        while self.recv_data_total < lenght:
-            self.socket.settimeout(local_timeout - time.time())
+        self.sending = False
+        self.recv_window = min(length, self.recv_window)
+        recv_data_total:bytes = b""
+        ahead_packages = dict()
+        end_of_conn = -1
+        max_acknum = self.acknum + length
+        local_timeout = time.time() + self.RECV_TIMEOUT + self.timeout
+        while len(recv_data_total) < length:
+            #debug("len(recv_data_tota) %s",len(recv_data_total))
             now = time.time()
+            self.socket.settimeout(local_timeout - time.time())
             try:
-                packet = self.socket.recv(self.take_from_buffer)
+                packet, addr = self.socket.recvfrom(40 + self.recv_window)
             except socket.timeout:
-                logging.error("Timeout Ocurred while waiting for a package. Stopped recieving. Returning recieved data.")
+                error("Timeout ocrred while waiting for a package. Returning recieved till now")
                 self.socket.settimeout(None)
-                return unify_byte_list(self.recv_data)
+                return recv_data_total
             try:
-                packet = self.decode_packet(packet)
+                data, source, dest, secnum, acknum, flags, _ = self.unpack(packet)
             except ConnException:
-                logging.info("Problem ocurred while decoding package.")
-                logging.debug("Packet: %s",packet)
                 continue
-            data, source, dest, secnum, acknum, flags, _ = packet
-            if dest != self.socket.getsockname() or source != self.dest_hostport:
-                logging.info("Recieved package from a different connection.")
-                logging.debug("This process sends to %s and has address %s.", self.dest_hostport, self.socket.getsockname())
-                logging.debug("But it recieved a package from  %s that was sent to %s.", source, dest)
+            
+            if dest[0] != self.source_hostport[0] or source[0] != self.dest_hostport[0]:
+                info("Wrong Address")
                 continue
-
+            
+            #debug("self.secnum %s self.acnum %s",self.secnum, self.acknum)
+            #debug("acknum %s self.secnum %s", acknum, secnum)
             self.update_timeout(now)
-            logging.debug("Recieved Data(%s) secnum: %s acknum: %s buffer: %s", len(data), secnum, acknum, self.take_from_buffer)
-            logging.debug("self.secnum %s self.acknum %s", self.secnum, self.acknum)
             if secnum == self.acknum and len(data) > 0:
-                local_timeout = time.time() + 10 + self.timeout
-                logging.debug("Data saved to buffer")
-                self.acknum = self.acknum + len(data) if self.acknum + len(data) < max_acknum else max_acknum
-                self.recv_data_total = self.acknum - self.i_acknum
-                self.recv_data.append(data)
-                if len(self.ahead_packages):
-                    self.acknum = link_data(self.recv_data, self.acknum, self.ahead_packages, max_acknum)
-                    self.recv_data_total = self.acknum - self.i_acknum
+                debug("Im herre saving the data")
+                local_timeout = time.time() + self.RECV_TIMEOUT + self.timeout
+                self.acknum = min(self.acknum + len(data), max_acknum)
+                recv_data_total += data
+                if len(ahead_packages):
+                    #debug("Linking data")
+                    self.acknum, recv_data_total = link_data(recv_data_total, ahead_packages, self.acknum, max_acknum)
                 self.send_control("ack = 1")
-                if end_of_conn == self.acknum:
-                    logging.info("After Linking sparse data Fin flag found.")
+                if self.acknum == end_of_conn or self.acknum == max_acknum:
+                    info("Recieved all possible data.")
                     break
             elif secnum > self.acknum and len(data) > 0:
+                debug("Ahead package recieved.")
                 try:
-                    self.ahead_packages[secnum]
-                    logging.debug("Recieving ahead package already added")
-                    local_timeout = time.time() + 7 + self.timeout
+                    ahead_packages[secnum]
                 except:
-                    logging.debug("Adding data to ahead packages")
-                    local_timeout = time.time() + 10 + self.timeout
-                    self.ahead_packages[secnum] = data
+                    ahead_packages[secnum] = data
                     if "fin" in flags:
-                        logging.debug("FIN flag found in ahead packages")
+                        #debug("fin in flags found in ahead")
                         end_of_conn = secnum + len(data)
                 self.send_control("ack = 1")
+                local_timeout = time.time() + self.RECV_TIMEOUT + self.timeout
                 continue
-            elif secnum < self.acknum and len(data) > 0:
-                local_timeout = time.time() + 10 + self.timeout
-                logging.debug("Re-Sending ACK due to old package arrival")
+            elif len(data) > 0:
+                debug("Old package recieved, re-sending ACK")
+                local_timeout = time.time() + self.RECV_TIMEOUT + self.timeout
                 self.send_control("ack = 1")
             
             if "fin" in flags:
-                logging.debug("Fin Flags stopping reciever.")
+                #print("---------------------FIN FLAG recieved")
                 break
-
+        
+        #debug("sending final control")
         self.socket.settimeout(None)
-        logging.info("Sent Termination Control Message")
-        self.send_control("ack = 1 fin = 1")
-        result = unify_byte_list(self.recv_data)
-        return result[0:lenght]
+        #self.send_control("ack = 1 fin = 1")
+        return recv_data_total[0:length]
 
-    def close(self):
-        logging.debug("Closing socket")
-        self.socket.close()
-        self.socket = None
+    def send_control(self, flags:str):
+        #debug("Senfind ack %s", self.acknum)
+        on_flags, off_flags = parse_flags(flags)
+        packet = self.pack(b"", (on_flags, off_flags))
+        self.socket.sendto(packet, (self.dest_hostport[0], 0))
 
-    def increase_sending_rate(self):
-        if self.slow_start or (self.threshold != -1 and self.cong_window < int(self.threshold)):
-            self.cong_window *= 2
-        elif self.cong_avoid:
-            self.cong_window += 1
-        logging.info(">>>>Increasing sending rate>>>>")
-        logging.debug("Congestion Control Mechanism: ss(%s) avoidance(%s) Congetion Window Size: %s Threshold: %s", self.slow_start, self.cong_avoid, self.cong_window, self.threshold)
+    
+    def pack(self, data:bytes, flags, secnum = -1) -> bytes:
+        ip_header = b""
+        #ip_header  = b'\x45\x00\x00\x28'
+        #ip_header += b'\xab\xcd\x00\x00'
+        #ip_header += b'\x40\x06\xa6\xec'
+        #ip_header += from_address_to_bytes(self.source_hostport[0])
+        #ip_header += from_address_to_bytes(self.dest_hostport[0])
 
-    def congestion_control(self, timeout=False, triple_ack = False):
-        logging.info("<<<<Congestion Control<<<<")
-        logging.debug("Timeout Ocurred: %s 3ple ACK recieved: %s",timeout, triple_ack)
-        logging.debug("ss(%s) avoidance(%s) window size: %s threshold: %s", self.slow_start, self.cong_avoid, self.cong_window, self.threshold)
+        secnum = self.secnum if secnum == -1 else secnum
+
+        tcp_header  = self.source_hostport[1].to_bytes(2, "big")
+        tcp_header += self.dest_hostport[1].to_bytes(2, "big")
+        tcp_header += secnum.to_bytes(4, "big")
+        tcp_header += self.acknum.to_bytes(4, "big")
+        tcp_header += b"\x50"
+        tcp_header += self.set_flags(flags, temp=True)
+        tcp_header += self.recv_window.to_bytes(2, "big")#Recieve Window
+        tcp_header += calculate_checksum(tcp_header)
+        tcp_header += b"\x00\x00"
+
+        return ip_header + tcp_header + data
+
+    def unpack(self, packet:bytes):
+        assert len(packet) >= 40, f"Cant unpack, to small({len(packet)})"
+        ip_header = packet[0:20]
+        assert calculate_checksum(ip_header) == b"\x00\x00", "IP Header compromised, checksum error."
+        source_addr = from_bytes_to_address(ip_header[12:16])
+        dest_addr = from_bytes_to_address(ip_header[16:20])
+
+        tcp_header = packet[20:40]
+        assert calculate_checksum(tcp_header) == b"\x00\x00", "TCP Header compromised, checksum error."
+        source_port = int.from_bytes(tcp_header[0:2], "big")
+        dest_port = int.from_bytes(tcp_header[2:4], "big")
+        secnumber = int.from_bytes(tcp_header[4:8], "big")
+        acknumber = int.from_bytes(tcp_header[8:12], "big")
+        flags = from_bytes_to_flags(tcp_header[13])
+        recv_window = int.from_bytes(tcp_header[14:16], "big")
+        
+
+        data = packet[40:]
+        return data, (source_addr, source_port), (dest_addr, dest_port), secnumber, acknumber, flags, recv_window
+
+    def congestion_control(self, timeout=False, triple_ack=False):
+        #print("Congestion control")
         if self.slow_start:
             self.threshold = ceil(self.cong_window/2)
             self.cong_window = 1
@@ -417,14 +421,17 @@ class Conn:
             if timeout:
                 self.threshold = ceil(self.cong_window/2)
                 self.cong_window = 1
-                self.cong_avoid = False
                 self.slow_start = True
+                self.cong_avoid = False
             elif triple_ack:
                 self.threshold = ceil(self.cong_window/2)
                 self.cong_window = int(self.cong_window/2) + 3
-                #self.cong_avoid = False
-                #self.fast_recovery = True
-        logging.debug("Update: ss(%s) avoidance(%s) window size: %s threshold: %s", self.slow_start, self.cong_avoid, self.cong_window, self.threshold)
+
+    def increase_sending_rate(self):
+        if self.slow_start or (self.threshold != -1 and self.cong_window < int(self.threshold)):
+            self.cong_window *= 2
+        elif self.cong_avoid:
+            self.cong_window += 1
 
     def update_last_acknum(self,new_acknum:int):
         old_acknum, times = self.recv_last_acknum
@@ -444,130 +451,48 @@ class Conn:
         self.est_rtt = 0.875*self.est_rtt + 0.125*sam_in_rtt
         self.dev_rtt = 0.75*self.dev_rtt + 0.25*abs(sam_in_rtt - self.est_rtt)
         self.timeout =  self.est_rtt + 4*self.dev_rtt
-        logging.debug("Timeout Updated to %s", self.timeout)
+        #debug("Timeout Updated to %s", self.timeout)
 
-    def set_flags(self, flags, temp:bool = False) -> bytes:
+    def initialize_send_variables(self):
+        self.i_secnum = self.secnum
+        self.total_ack = 0
+        self.sending = False
+        self.slow_start = True
+        self.cong_avoid = False
+        self.cong_window = 1
+        self.threshold = -1
+        self.recv_last_acknum = (-1, -1)
+
+        self.mutex.acquire()
+        self.unacknowledge = deque()
+        self.mutex.release()
+    
+    def initialize_recv_variables(self):
+        self.i_secnum = self.secnum
+
+    def set_flags(self, flags, temp:bool=False) -> bytes:
+        if isinstance(flags, bytes):
+            return flags
         if isinstance(flags, str):
             on_flags, off_flags = parse_flags(flags)
         else:
             on_flags, off_flags = flags
-
+        
         flags_bytes = {"cwr":128, "ece":64, "urg":32, "ack":16, "las":8, "rst":4, "syn":2, "fin":1}
-
         if not temp:
             for flag in on_flags:
                 self.flags[flag] = True
             for flag in off_flags:
                 self.flags[flag] = False
         
-        num = 0
+        flag_num = 0
         for flag in self.flags:
-            num += flags_bytes[flag] if self.flags[flag] else 0
+            flag_num += flags_bytes[flag] if self.flags[flag] else 0
         
         if temp:
             for flag in off_flags:
-                num -= flags_bytes[flag] if self.flags[flag] else 0
+                flag_num -= flags_bytes[flag] if self.flags[flag] else 0
             for flag in on_flags:
-                num += flags_bytes[flag] if not self.flags[flag] else 0
+                flag_num += flags_bytes[flag] if not self.flags[flag] else 0
         
-        return num.to_bytes(1, "big")
-
-    def make_packet(self, data:bytes, tcp_flags, secnum:int = None) -> bytes:
-        source_port = self.socket.getsockname()[1].to_bytes(2, "big")
-        dest_port = self.dest_hostport[1].to_bytes(2, "big")
-
-        sequence_num = self.secnum.to_bytes(4, "big") if not secnum else secnum.to_bytes(4, "big")
-        acknowledge_num = self.acknum.to_bytes(4, "big")
-
-        flags = self.set_flags(tcp_flags, temp=True) if not isinstance(tcp_flags, bytes) else tcp_flags
-        try:
-            recv_window:bytes  = self.take_from_buffer.to_bytes(2, "big")
-        except OverflowError:
-            logging.warning("Invalid size for recieve window. Setting to highest possible")
-            recv_window:bytes = (2**16 - 1).to_bytes(2, "big")
-
-        data_offset_reserved = b"\x50"
-        urgent_pointer =b"\x00\x00" 
-        
-        tcp_header = source_port + dest_port + sequence_num + acknowledge_num + data_offset_reserved + flags + recv_window
-        checksum = calculate_checksum(tcp_header + urgent_pointer)
-        
-        tcp_header = tcp_header + checksum + urgent_pointer
-        
-        return tcp_header + data
-
-    def decode_packet(self, packet:bytes) -> Tuple[bytes, Tuple[str,int], Tuple[str,int], int, int, Set[str], int]:
-        ip_header = packet[0:20]
-        tcp_header = packet[20:40]
-        data = packet[40:]
-        
-        checksum = int.from_bytes(calculate_checksum(ip_header), "big")
-        if checksum != 0:
-            raise ConnException(f"IP Header Compromised. Checksum Error. Expected 0 instead {checksum}")
-        checksum = int.from_bytes(calculate_checksum(tcp_header), "big")
-        if checksum != 0:
-            raise ConnException(f"TCP Header Compromised. Checksum Error. Expected 0 instead {checksum}")
-
-        ipv_ihl, typeservice, totallength = ip_header[0], ip_header[1], ip_header[2:4]
-        ident, flags_offset = ip_header[4:6], ip_header[6:8]
-        ttl, protocol, checksum = ip_header[8], ip_header[9], ip_header[10:12]
-        source_addr = ip_header[12:16]
-        dest_addr = ip_header[16:20]
-        
-        dest_addr = from_bytes_to_address(dest_addr)
-        source_addr = from_bytes_to_address(source_addr)
-    
-        source_port, dest_port = tcp_header[0:2], tcp_header[2:4]
-        secnumber= tcp_header[4:8]
-        acknumber = tcp_header[8:12]
-        offset_reserved, flags, recv_window = tcp_header[12], tcp_header[13], tcp_header[14:16]
-        checksum, urgentpointer = tcp_header[16:18], tcp_header[18:20]
-
-        source_port = int.from_bytes(source_port, "big")
-        dest_port = int.from_bytes(dest_port, "big")
-        secnumber = int.from_bytes(secnumber, "big")
-        acknumber = int.from_bytes(acknumber, "big")
-        recv_window = int.from_bytes(recv_window, "big")
-        flags = from_bytes_to_flags(flags)
-
-        return data, (source_addr, source_port), (dest_addr, dest_port), secnumber, acknumber, flags , recv_window
-
-    def initialize_send_variables(self):
-        self.i_secnum = self.secnum
-        self.i_acknum = self.acknum
-        self.sending = False
-        self.max_transm:int = 40 + self.max_segment
-        self.total_sent = 0
-        self.total_ack = 0
-        self.unacknowledge = deque()
-        self.last_ack_sec = -1
-        
-        self.cong_window:int = 1
-        self.threshold:int  = -1
-        self.recv_last_acknum = (-1, -1)
-        self.slow_start = True
-        self.cong_avoid:bool = False
-        self.fast_recovery:bool = False
-    
-    def initialize_recv_variables(self):
-        self.i_secnum = self.secnum
-        self.i_acknum = self.acknum
-        self.recv_window:int = 1
-        self.recv_data_total:int = 0
-        self.recv_data = []
-        self.ahead_packages = dict()
-
-    def start_child(self):
-        conn = Conn()
-        conn.socket.bind((self.socket.getsockname()[0],0))
-        conn.server = self.server
-        conn.client = self.client
-        conn.source_hostport = self.source_hostport
-        conn.dest_hostport = self.dest_hostport
-        conn.secnum = self.secnum
-        conn.acknum = self.acknum
-        conn.i_secnum = self.i_secnum
-        conn.i_acknum = self.i_acknum
-        conn.flags = self.flags
-        return conn
-
+        return flag_num.to_bytes(1, "big")

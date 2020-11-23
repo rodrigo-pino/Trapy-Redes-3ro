@@ -3,6 +3,7 @@ import shlex
 import subprocess
 import logging
 from math import ceil
+from typing import Tuple
 
 
 def parse_address(address:str):
@@ -14,6 +15,9 @@ def parse_address(address:str):
     return host, int(port)
 
 def from_address_to_bytes(address) -> bytes:
+    if address == "":
+        return b"\x00\x00\x00\x00"
+
     address = address.split('.')
     byte_address = bytes()
     for n in address:
@@ -67,19 +71,19 @@ def calculate_checksum(header:bytes) -> bytes:
     
     return (~checksum + 2**16).to_bytes(2, "big")
 
-def link_data(data:list, acknum:int, sparse_data:dict, max_acknum:int) -> int:
+def link_data(data:bytes, sparse_data:dict, acknum:int, max_acknum:int) -> Tuple[int, bytes]:
     if acknum >= max_acknum:
-        return max_acknum
+        return max_acknum, data
     for secnum in sparse_data:
         if secnum < acknum:
             sparse_data.pop(secnum)
-            return link_data(data, acknum, sparse_data, max_acknum)
+            return link_data(data, sparse_data, acknum, max_acknum)
         elif secnum == acknum:
             value = sparse_data.pop(secnum)
             acknum += len(value)
-            data.append(value)
-            return link_data(data, acknum, sparse_data, max_acknum)
-    return acknum
+            data += value
+            return link_data(data, sparse_data, acknum, max_acknum)
+    return acknum, data
 
 def sum_list(data:list):
     sum = []
@@ -202,13 +206,14 @@ def set_log_level(level:str) -> int:
 
 #a()
 
-#data = []
+#data = b"yonixsma-"
 #total_data = 1034
-#sparse_data = {1038:"e", 1040:"f", 1035:"b", 1036:"c", 1042:"g", 1034:"a", 1037:"d"}
+#sparse_data = {1038:b"e", 1040:b"f", 1035:b"b", 1036:b"c", 1042:b"g", 1034:b"a", 1037:b"d"}
 
-#total_data = link_data(data, total_data, sparse_data)
+#total_data = link_data(data,  sparse_data, total_data, 99999)
 #print(data)
 #print(total_data)
+#print(data)
 
 #def a():
 #    return 1,2,3
@@ -231,3 +236,16 @@ def set_log_level(level:str) -> int:
 #logging.warning("Warning")
 #logging.info("Info")
 #logging.error("Error")
+
+#from concurrent.futures import ThreadPoolExecutor
+
+#def b():
+    #print("bbb")
+    #while(True):
+    #    pass
+
+#executor = ThreadPoolExecutor()
+#executor.submit(b)
+#executor.shutdown(True)
+#print("Estoy aca")
+

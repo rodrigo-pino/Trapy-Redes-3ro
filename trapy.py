@@ -1,33 +1,35 @@
-import logging
-import socket
-from typing import Tuple
+import re
+from utils import parse_address
+from conn import Conn
 
-from conn import Conn, ConnException
-from utils import chunk_bytes, parse_address, unify_byte_list
-
-
-def listen(address: str, max_connections:int = 1, loglevel:str="warning") -> Conn:
-    conn = Conn(loglevel=loglevel)
-    addr =  parse_address(address)
-    conn.socket.bind(addr)
-    conn.listen(max_connections)
+def listen(address: str, listen:int=1) -> Conn:
+    conn = Conn()
+    conn.listen(address, 3)
     return conn
 
-def accept(conn: Conn, max_segment_size:int = 1000, take_from_buffer:int = 1000):
-    return conn.accept(max_segment_size=max_segment_size, take_from_buffer=take_from_buffer)
+def accept(conn: Conn):
+    return conn.accept()
 
-def dial(address: str, max_segment_size:int = 1000, take_from_buffer:int = 1000, loglevel:str="warning"):
-    conn = Conn(max_segment_size=max_segment_size, take_from_buffer=take_from_buffer, loglevel=loglevel)
-    if conn.connect(address) == 1:
+def dial(address: str):
+    conn = Conn()
+    conn.connect(address)
+    if conn.connect:
         return conn
     return None
 
-def send(conn:Conn, data:bytes) -> int:
-    return conn.send(data)
+def send(conn:Conn, data:bytes, count:int = 3) -> int:
+    sent = conn.send(data)
+    if sent == len(data) or count <= 0:
+        return sent
+    return sent + send(conn, data[sent:], count - 1)
 
 def recv(conn:Conn, length:int) -> bytes:
-    result = conn.recv(length)
-    return result
+    return conn.recv(length)
 
-def close(conn: Conn):
-    conn.close()
+def close(conn:Conn) -> None:
+    print("Closing")
+    conn.send_control("fin = 1")
+    conn.socket.close()
+    conn.socket = None
+    conn = None
+
