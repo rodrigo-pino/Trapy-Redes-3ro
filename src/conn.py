@@ -1,12 +1,10 @@
 from collections import deque
 import logging
 from math import ceil
-from socket import timeout
-from conn_old import ConnException
 import socket
 import time
 from random import randint
-from utils import calculate_checksum, from_address_to_bytes, from_bytes_to_address, from_bytes_to_flags, link_data, obtain_chunk, parse_address, parse_flags
+from utils import calculate_checksum,  from_bytes_to_address, from_bytes_to_flags, link_data, obtain_chunk, parse_address, parse_flags
 from logging import debug, error, info, warning
 from threading import Thread, Lock
 
@@ -146,7 +144,7 @@ class Conn():
         packet, addr = self.socket.recvfrom(40)
         try:
             _, source, dest, secnum, acknum, flags, recv_window = self.unpack(packet)
-        except ConnException:
+        except AssertionError:
             return 0
 
         if dest[0] != self.source_hostport[0]:
@@ -177,14 +175,13 @@ class Conn():
         return 0
 
     def recv_control(self):
-        #debug("Recieving control")
         while self.sending:
             packet, addr = self.socket.recvfrom(65565)
             if not self.sending:
                 return
             try:
                 data, source, dest, secnum, acknum, flags, recv_window = self.unpack(packet)
-            except ConnException:            
+            except AssertionError:            
                 info("A problem ocurred while unpacking")
                 continue
             if dest[0] != self.source_hostport[0] or source[0] != self.dest_hostport[0]:
@@ -228,13 +225,8 @@ class Conn():
                         self.update_timeout(send_time)
                     else:
                         aux.appendleft(self.unacknowledge[i])
-                    #break
                 self.unacknowledge = aux
                 self.mutex.release()
-        #debug("Stoped recieving")
-        #while not self.sending:
-        #    pass
-        #return self.recv_control()        
 
     def send(self, data:bytes, flags:str="") -> int:
         self.initialize_send_variables()
@@ -246,7 +238,6 @@ class Conn():
         while self.total_ack < len(data) and self.sending:
             local_timeout = time.time() + self.SEND_TIMEOUT + self.timeout
             chunk, total_sent = obtain_chunk(data, min(self.dynamic_segment_size, len(data) - total_sent), total_sent)
-            #debug("Total sent till now  %s  total ack %s   dynamic_segment_size %s", total_sent, self.total_ack, self.dynamic_segment_size)
             #if total_sent == len(data):
                 #print("Adding fin to on_flags")
                 #on_flags.add("fin")
@@ -313,7 +304,7 @@ class Conn():
                 return recv_data_total
             try:
                 data, source, dest, secnum, acknum, flags, _ = self.unpack(packet)
-            except ConnException:
+            except AssertionError:
                 continue
             
             if dest[0] != self.source_hostport[0] or source[0] != self.dest_hostport[0]:
@@ -369,13 +360,6 @@ class Conn():
 
     
     def pack(self, data:bytes, flags, secnum = -1) -> bytes:
-        ip_header = b""
-        #ip_header  = b'\x45\x00\x00\x28'
-        #ip_header += b'\xab\xcd\x00\x00'
-        #ip_header += b'\x40\x06\xa6\xec'
-        #ip_header += from_address_to_bytes(self.source_hostport[0])
-        #ip_header += from_address_to_bytes(self.dest_hostport[0])
-
         secnum = self.secnum if secnum == -1 else secnum
 
         tcp_header  = self.source_hostport[1].to_bytes(2, "big")
@@ -388,7 +372,7 @@ class Conn():
         tcp_header += calculate_checksum(tcp_header)
         tcp_header += b"\x00\x00"
 
-        return ip_header + tcp_header + data
+        return tcp_header + data
 
     def unpack(self, packet:bytes):
         assert len(packet) >= 40, f"Cant unpack, to small({len(packet)})"
