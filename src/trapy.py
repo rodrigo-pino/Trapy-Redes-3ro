@@ -1,14 +1,15 @@
-import re
-from utils import parse_address
 from conn import Conn
 
-def listen(address: str, listen:int=1) -> Conn:
+
+def listen(address: str, listen: int = 1) -> Conn:
     conn = Conn()
-    conn.listen(address, 3)
+    conn.listen(address, listen)
     return conn
+
 
 def accept(conn: Conn):
     return conn.accept()
+
 
 def dial(address: str):
     conn = Conn()
@@ -17,19 +18,21 @@ def dial(address: str):
         return conn
     return None
 
-def send(conn:Conn, data:bytes, count:int = 3) -> int:
+
+def send(conn: Conn, data: bytes, count: int = 3) -> int:
     sent = conn.send(data)
     if sent == len(data) or count <= 0:
         return sent
     return sent + send(conn, data[sent:], count - 1)
 
-def recv(conn:Conn, length:int) -> bytes:
+
+def recv(conn: Conn, length: int) -> bytes:
     return conn.recv(length)
 
-def close(conn:Conn) -> None:
+
+def close(conn: Conn) -> None:
     print("Closing")
     conn.send_control("fin = 1")
     conn.socket.close()
     conn.socket = None
     conn = None
-
